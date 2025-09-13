@@ -195,7 +195,7 @@ if __name__ == "__main__":
 
     if not args.file:
         print("Usage: say_parser.py <file.say> [--tokens]")
-        raise SystemExit(1)
+        raise SystemExit(0)
 
     if not os.path.isfile(args.file):
         print(f"File not found: {args.file}")
