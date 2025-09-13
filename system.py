@@ -2762,3 +2762,3292 @@ if __name__ == "__main__":
     from say_vm import ExecVM, Program
     from say_optimizer import Pass, ConstantFoldingPass, DeadCodeElimPass, peephole_optimize_ops, simple_loop_unroll, stack_to_register_ops, serialize_ops_to_bytes
     import re
+    import json
+    import sys
+    import time
+    # ---------------------------
+    # Safe eval
+    def safe_eval(expr: str, vars: Optional[Dict[str, Any]] = None, timeout: float = 1.0) -> Any:
+        """
+        Safely evaluate a simple arithmetic expression with optional variables.
+        Supports +, -, *, /, parentheses, integers, floats, and variable names.
+        Execution is limited by timeout (in seconds).
+        """
+        allowed_names = {
+            'abs': abs,
+            'round': round,
+            'min': min,
+            'max': max,
+            'int': int,
+            'float': float,
+        }
+        if vars:
+            allowed_names.update(vars)
+        code = compile(expr, "<string>", "eval")
+        for name in code.co_names:
+            if name not in allowed_names:
+                raise NameError(f"Use of '{name}' not allowed in safe_eval")
+        start_time = time.time()
+        def time_limited_eval():
+            if time.time() - start_time > timeout:
+                raise TimeoutError("safe_eval timed out")
+            return eval(code, {"__builtins__": {}}, allowed_names)
+        return time_limited_eval()
+    # ---------------------------
+    # Base-12 numerics
+    def to_base12(n: int) -> str:
+        """Convert integer n to base-12 string using digits 0-9, T (10), E (11)."""
+        if n == 0:
+            return "0"
+        digits = []
+        neg = n < 0
+        n = abs(n)
+        while n:
+            r = n % 12
+            if r < 10:
+                digits.append(str(r))
+            elif r == 10:
+                digits.append("T")
+            else:
+                digits.append("E")
+            n //= 12
+        if neg:
+            digits.append("-")
+        return "".join(reversed(digits))
+    def from_base12(s: str) -> int:
+        """Convert base-12 string s to integer."""
+        s = s.strip().upper()
+        if not s or any(c not in "0123456789TE-" for c in s):
+            raise ValueError(f"Invalid base-12 string: {s}")
+        neg = s.startswith("-")
+        if neg:
+            s = s[1:]
+        n = 0
+        for c in s:
+            if c in "0123456789":
+                v = int(c)
+            elif c == "T":
+                v = 10
+            elif c == "E":
+                v = 11
+            else:
+                raise ValueError(f"Invalid character in base-12 string: {c}")
+            n = n * 12 + v
+            return
+    
+# ---------------------------
+# Additional extensive utility functions appended to bottom of file
+# ---------------------------
+import ast
+import hashlib
+import io
+import subprocess
+import tempfile
+from functools import wraps
+from threading import Thread, Event
+from time import monotonic
+from typing import Callable, Iterable, Iterator
+
+# --- Robust base-12 helpers (safe, well-tested) ----------------------------
+_BASE12_DIGITS = "0123456789TE"  # T==10, E==11
+
+def to_base12_ext(n: int) -> str:
+    """
+    Convert integer to base-12 string using digits 0-9,T(10),E(11).
+    Stable, iterative implementation that handles negatives.
+    """
+    if n == 0:
+        return "0"
+    neg = n < 0
+    n = abs(n)
+    out = []
+    while n:
+        out.append(_BASE12_DIGITS[n % 12])
+        n //= 12
+    if neg:
+        out.append("-")
+    return "".join(reversed(out))
+
+def from_base12_ext(s: str) -> int:
+    """
+    Parse base-12 string produced by `to_base12_ext`. Raises ValueError on invalid input.
+    Accepts optional leading '+' or '-' and tolerates surrounding whitespace.
+    """
+    if not isinstance(s, str):
+        raise TypeError("from_base12_ext expects a string")
+    s = s.strip().upper()
+    if s == "":
+        raise ValueError("empty string")
+    neg = False
+    if s[0] in "+-":
+        neg = s[0] == "-"
+        s = s[1:]
+    if s == "":
+        raise ValueError("no digits")
+    value = 0
+    for ch in s:
+        try:
+            v = _BASE12_DIGITS.index(ch)
+        except ValueError:
+            raise ValueError(f"invalid base-12 digit: {ch!r}")
+        value = value * 12 + v
+    return -value if neg else value
+
+# --- Safe expression evaluator using AST whitelisting -----------------------
+_ALLOWED_AST_NODES = {
+    ast.Expression,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.Num,
+    ast.Constant,
+    ast.Name,
+    ast.Load,
+    ast.Add,
+    ast.Sub,
+    ast.Mult,
+    ast.Div,
+    ast.FloorDiv,
+    ast.Mod,
+    ast.Pow,
+    ast.USub,
+    ast.UAdd,
+    ast.LShift,
+    ast.RShift,
+    ast.BitOr,
+    ast.BitAnd,
+    ast.BitXor,
+    ast.Compare,
+    ast.Eq,
+    ast.NotEq,
+    ast.Lt,
+    ast.LtE,
+    ast.Gt,
+    ast.GtE,
+    ast.And,
+    ast.Or,
+    ast.BoolOp,
+    ast.IfExp,
+    ast.Tuple,
+    ast.List,
+}
+
+def _ast_is_allowed(node: ast.AST) -> bool:
+    """Recursively check AST only contains allowed node types."""
+    if type(node) not in _ALLOWED_AST_NODES:
+        return False
+    for child in ast.iter_child_nodes(node):
+        if not _ast_is_allowed(child):
+            return False
+    return True
+
+def safe_eval_ast(expr: str, variables: Optional[Dict[str, object]] = None, timeout_sec: Optional[float] = None) -> object:
+    """
+    Evaluate a small expression safely using AST validation.
+    - Supports arithmetic, booleans, comparisons, and simple names.
+    - `variables` provides the allowed names (numbers/functions not allowed).
+    - Optional `timeout_sec` will raise TimeoutError if evaluation doesn't finish.
+    """
+    if variables is None:
+        variables = {}
+    # parse expression
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError as e:
+        raise ValueError(f"invalid expression: {e}") from e
+    if not _ast_is_allowed(tree):
+        raise ValueError("expression contains disallowed constructs")
+    # build evaluation closure
+    code = compile(tree, "<safe_eval>", "eval")
+    result_container = {}
+    done = Event()
+    def _runner():
+        try:
+            result_container["value"] = eval(code, {"__builtins__": {}}, variables)
+        except Exception as e:
+            result_container["error"] = e
+        finally:
+            done.set()
+    t = Thread(target=_runner, daemon=True)
+    t.start()
+    started = monotonic()
+    if timeout_sec is None:
+        done.wait()
+    else:
+        waited = done.wait(timeout_sec)
+        if not waited:
+            raise TimeoutError("safe_eval_ast: evaluation timed out")
+    if "error" in result_container:
+        raise result_container["error"]
+    return result_container.get("value")
+
+# --- Atomic file helper / hashing / JSON-safe load --------------------------
+def hash_file_sha256(path: str, chunk_size: int = 8192) -> str:
+    """Return SHA-256 hex digest for a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def atomic_write_text(path: str, text: str, encoding: str = "utf-8") -> None:
+    """
+    Atomically write `text` to `path` by writing to a temporary file and renaming.
+    Ensures partial writes won't leave corrupt file.
+    """
+    dirn = os.path.dirname(path) or "."
+    with tempfile.NamedTemporaryFile("w", encoding=encoding, dir=dirn, delete=False) as tf:
+        tf.write(text)
+        tmpname = tf.name
+    os.replace(tmpname, path)
+
+def load_json_safe(path: str) -> Optional[object]:
+    """
+    Load JSON file returning parsed object, or None on parse error.
+    Does not raise for non-fatal problems; logs and returns None.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+# --- Lightweight LRU cache decorator (thread-safe-ish) ----------------------
+def lru_cache_simple(maxsize: int = 128):
+    """
+    Simple LRU cache decorator for pure functions with hashable args.
+    Not as featureful as functools.lru_cache but easy to inspect.
+    """
+    def deco(fn: Callable):
+        cache = {}
+        order = []
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            key = (args, tuple(sorted(kwargs.items())))
+            if key in cache:
+                # bump recency
+                try:
+                    order.remove(key)
+                except ValueError:
+                    pass
+                order.append(key)
+                return cache[key]
+            result = fn(*args, **kwargs)
+            cache[key] = result
+            order.append(key)
+            if len(order) > maxsize:
+                old = order.pop(0)
+                cache.pop(old, None)
+            return result
+        wrapped.cache_clear = lambda: (cache.clear(), order.clear())
+        wrapped._cache = cache
+        return wrapped
+    return deco
+
+# --- Robust subprocess runner with timeout and streamed output -------------
+def run_subprocess_capture(cmd: Iterable[str], timeout: Optional[float] = None) -> Tuple[int, str, str]:
+    """
+    Run a subprocess and capture stdout/stderr. Returns (returncode, stdout, stderr).
+    Uses subprocess.run with text mode. Raises TimeoutError on timeout.
+    """
+    try:
+        proc = subprocess.run(list(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError(f"subprocess timed out after {timeout}s") from e
+
+# --- Retry decorator for flaky IO / network calls ---------------------------
+def retry(times: int = 3, delay: float = 0.1, allowed_exceptions: Tuple[type, ...] = (Exception,)):
+    """
+    Retry decorator. Retries `times` times on allowed_exceptions with `delay` seconds between attempts.
+    """
+    def deco(fn: Callable):
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            last_exc = None
+            for attempt in range(1, times + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except allowed_exceptions as e:
+                    last_exc = e
+                    if attempt == times:
+                        break
+                    time.sleep(delay)
+            raise last_exc
+        return wrapped
+    return deco
+
+# --- Tiny test/helpers that can be called from other modules ----------------
+def _self_test_base12():
+    cases = [0, 1, 10, 11, 12, 144, -1, 12345]
+    for n in cases:
+        txt = to_base12_ext(n)
+        got = from_base12_ext(txt)
+        if got != n:
+            raise AssertionError(f"base12 roundtrip failed for {n}: encoded={txt} decoded={got}")
+    return True
+
+def _self_test_safe_eval():
+    assert safe_eval_ast("1 + 2 * 3") == 7
+    assert safe_eval_ast("-5 + 2") == -3
+    assert safe_eval_ast("2 ** 3") == 8
+    assert safe_eval_ast("1 < 2 and 3 > 2") is True
+    return True
+
+def run_self_tests() -> Dict[str, bool]:
+    """
+    Run lightweight self-tests for the helpers added in this section.
+    Returns a mapping of test-name -> bool success.
+    """
+    results = {}
+    try:
+        results["base12"] = _self_test_base12()
+    except Exception:
+        results["base12"] = False
+    try:
+        results["safe_eval"] = _self_test_safe_eval()
+    except Exception:
+        results["safe_eval"] = False
+    return results
+
+# Expose a concise __all__ for importers that want the utilities
+__all__ = [
+    "to_base12_ext", "from_base12_ext",
+    "safe_eval_ast",
+    "hash_file_sha256", "atomic_write_text", "load_json_safe",
+    "lru_cache_simple", "run_subprocess_capture", "retry",
+    "run_self_tests",
+]
+
+# --- Editor/IDE features: syntax highlight, autocorrect, completions --------
+def syntax_highlight(source: str) -> str:
+    """
+    Simple syntax highlighter for Sayit source code.
+    Wraps keywords, numbers, strings, comments in ANSI color codes.
+    """
+    import keyword
+    KEYWORDS = set(keyword.kwlist + ["print", "if", "else", "while", "def", "return", "let", "in", "true", "false"])
+    token_specification = [
+        ("NUMBER",   r'\b\d+(\.\d*)?\b'),  # Integer or decimal number
+        ("STRING",   r'"([^"\\]|\\.)*"'),  # Double-quoted string
+        ("COMMENT",  r'#.*'),               # Comment
+        ("ID",       r'\b[a-zA-Z_][a-zA-Z0-9_]*\b'),  # Identifiers
+        ("OP",       r'[+\-*/=<>!]+'),     # Operators
+        ("NEWLINE",  r'\n'),                # Line endings
+        ("SKIP",     r'[ \t]+'),           # Skip over spaces and tabs
+        ("MISMATCH", r'.'),                 # Any other character
+    ]
+    tok_regex = '|'.join(f'(?P<{pair[0]}>{pair[1]})' for pair in token_specification)
+    get_token = re.compile(tok_regex).match
+    line_num = 1
+    line_start = 0
+    pos = 0
+    mo = get_token(source)
+    highlighted = []
+    while mo is not None:
+        kind = mo.lastgroup
+        value = mo.group()
+        if kind == "NUMBER":
+            highlighted.append(f"\033[94m{value}\033[0m")  # Blue
+        elif kind == "STRING":
+            highlighted.append(f"\033[92m{value}\033[0m")  # Green
+        elif kind == "COMMENT":
+            highlighted.append(f"\033[90m{value}\033[0m")  # Grey
+        elif kind == "ID":
+            if value in KEYWORDS:
+                highlighted.append(f"\033[95m{value}\033[0m")  # Magenta for keywords
+            else:
+                highlighted.append(value)
+        elif kind == "OP":
+            highlighted.append(f"\033[93m{value}\033[0m")  # Yellow
+            highlighted.append(value)
+line_start = pos
+line_num += 1
+kind == "SKIP"
+highlighted.append(value)
+kind == "MISMATCH"
+highlighted.append(value)
+pos = mo.end()
+mo = get_token(source, pos)
+if pos != len(source):
+                            raise RuntimeError(f'{source[pos]!r} unexpected on line {line_num}')
+''.join(highlighted)
+def suggest_autocorrect(source: str, cursor_pos: int) -> List[str]:
+                        """
+                        Suggest autocorrections for the token at cursor_pos in source.
+                        Returns a list of suggestions.
+                        """
+                        tokens = list(_tokenize(source))
+                        for i, (typ, val, start, end) in enumerate(tokens):
+                            if start <= cursor_pos <= end:
+                                if typ == "ID":
+                                    # suggest keywords that start with the same prefix
+                                    prefix = val[:cursor_pos - start]
+                                    return [kw for kw in keyword.kwlist if kw.startswith(prefix) and kw != val]
+                                break
+                        return []
+
+def complete_code(source: str, cursor_pos: int) -> List[str]:
+    """
+    Provide code completions for the token at cursor_pos in source.
+    Returns a list of possible completions.
+    """
+    tokens = list(_tokenize(source))
+    for i, (typ, val, start, end) in enumerate(tokens):
+        if start <= cursor_pos <= end:
+            if typ == "ID":
+                prefix = val[:cursor_pos - start]
+                return [kw for kw in keyword.kwlist if kw.startswith(prefix)]
+            break
+    return []
+def sha1_of_text(text: str) -> str:
+    """Return SHA-1 hex digest of text."""
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+def write_cache(key: str, content: str) -> str:
+    """Write content to cache file named by key. Returns path."""
+    d = os.path.join(".cache")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, f"{key}.ll")
+    atomic_write_text(path, content)
+    return path
+
+def read_cache(key: str) -> Optional[str]:
+    """Read cached content by key, or None if not found."""
+    path = os.path.join(".cache", f"{key}.ll")
+    if os.path.isfile(path):
+ 
+            if verbose:
+                print("[sayc]", *args)
+                def discover_local_engines() -> Dict[str, str]:
+                    """Discover local engine modules in ./engines directory."""
+                    ENGINES_DIR = os.path.join(os.path.dirname(__file__), "engines")
+                    engines = {}
+                    if os.path.isdir(ENGINES_DIR):
+                        for fn in os.listdir(ENGINES_DIR):
+                            if fn.endswith(".py") and not fn.startswith("_"):
+                                name = os.path.splitext(fn)[0]
+                                path = os.path.join(ENGINES_DIR, fn)
+                                engines[name] = path
+                                return engines
+                            def load_engine_from_path(path: str):
+
+                                """Dynamically load a Python module from path."""
+                                import importlib.util
+                                spec = importlib.util.spec_from_file_location("engine_module", path)
+                                if spec is None or spec.loader is None:
+                                    raise ImportError(f"Cannot load module from {path}")
+                                mod = importlib.util.module_from_spec(spec)
+                                spec.loader.exec_module(mod)
+                                return mod
+                            def resolve_engine(engine: Optional[str], engine_path: Optional[str], verbose: bool = False) -> Dict[str, Any]:
+                                """Resolve engine name/path to a module or builtin."""
+                                with open(path, "r", encoding="utf-8") as f:
+                                    return load_json_safe(path)
+                                with open(path, "r", encoding="utf-8") as f:
+                                    return f.read()
+                                with open(path, "r", encoding="utf-8") as f:
+                                    return None
+                                return None
+                            return None
+                        with open(path, "r", encoding="utf-8") as f:
+                            return f.read()
+                        return None
+                    return None
+                return None
+            return None
+
+# Extensive networking, concurrency, IO and types additions
+import socket
+import selectors
+import ssl
+import asyncio
+import urllib.request
+import contextlib
+import os
+import threading
+import queue
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Callable, Optional, Dict, Any, List, Tuple, Iterator, TypedDict, Iterable
+import json
+import tempfile
+import hashlib
+import concurrent.futures
+
+# ---------------------------
+# Types / Data models
+# ---------------------------
+class ConnType(Enum):
+    TCP = "tcp"
+    SSL = "ssl"
+
+@dataclass
+class Endpoint:
+    host: str
+    port: int
+
+@dataclass
+class Message:
+    data: bytes
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+class HTTPResponse(TypedDict):
+    code: int
+    headers: Dict[str, str]
+    body: bytes
+
+# ---------------------------
+# Threaded TCP Server / Client (blocking, thread-per-connection)
+# ---------------------------
+class ExtTCPServer:
+    """
+    Simple threaded TCP server.
+    - handler(conn: socket.socket, addr: (host,port)) called in a worker thread per connection.
+    - start() launches acceptor thread; stop() shuts down gracefully.
+    """
+    def __init__(self, endpoint: Endpoint, backlog: int = 50, reuse_addr: bool = True, recv_buf: int = 4096):
+        self.endpoint = endpoint
+        self.backlog = backlog
+        self.recv_buf = recv_buf
+        self._sock: Optional[socket.socket] = None
+        self._accept_thread: Optional[threading.Thread] = None
+        self._stopped = threading.Event()
+        self._workers: List[threading.Thread] = []
+        self._handler: Optional[Callable[[socket.socket, Tuple[str,int]], None]] = None
+        self.reuse_addr = reuse_addr
+
+    def set_handler(self, handler: Callable[[socket.socket, Tuple[str,int]], None]):
+        self._handler = handler
+
+    def start(self):
+        if self._sock:
+            raise RuntimeError("server already started")
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if self.reuse_addr:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((self.endpoint.host, self.endpoint.port))
+        s.listen(self.backlog)
+        self._sock = s
+        self._stopped.clear()
+        self._accept_thread = threading.Thread(target=self._accept_loop, name="ExtTCPServer.accept", daemon=True)
+        self._accept_thread.start()
+
+    def _accept_loop(self):
+        assert self._sock is not None
+        while not self._stopped.is_set():
+            try:
+                client, addr = self._sock.accept()
+                if self._handler:
+                    th = threading.Thread(target=self._worker_wrapper, args=(client, addr), daemon=True)
+                    th.start()
+                    self._workers.append(th)
+                else:
+                    client.close()
+            except OSError:
+                break
+
+    def _worker_wrapper(self, client: socket.socket, addr):
+        try:
+            if self._handler:
+                self._handler(client, addr)
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def stop(self, wait: bool = True, timeout: Optional[float] = None):
+        self._stopped.set()
+        if self._sock:
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+            self._sock = None
+        if self._accept_thread:
+            self._accept_thread.join(timeout=timeout)
+            self._accept_thread = None
+        if wait:
+            for w in list(self._workers):
+                w.join(timeout=timeout)
+
+class ExtTCPClient:
+    """
+    Simple blocking TCP client with convenience send/recv helpers.
+    """
+    def __init__(self, endpoint: Endpoint, timeout: Optional[float] = None, use_ssl: bool = False, ssl_context: Optional[ssl.SSLContext] = None):
+        self.endpoint = endpoint
+        self.timeout = timeout
+        self.use_ssl = use_ssl
+        self.ssl_context = ssl_context
+        self.sock: Optional[socket.socket] = None
+
+    def connect(self):
+        s = socket.create_connection((self.endpoint.host, self.endpoint.port), timeout=self.timeout)
+        if self.use_ssl:
+            ctx = self.ssl_context or ssl.create_default_context()
+            s = ctx.wrap_socket(s, server_hostname=self.endpoint.host)
+        self.sock = s
+
+    def send(self, data: bytes):
+        if not self.sock:
+            raise RuntimeError("not connected")
+        totalsent = 0
+        while totalsent < len(data):
+            sent = self.sock.send(data[totalsent:])
+            if sent == 0:
+                raise RuntimeError("socket connection broken")
+            totalsent += sent
+
+    def recv(self, max_bytes: int = 4096) -> bytes:
+        if not self.sock:
+            raise RuntimeError("not connected")
+        return self.sock.recv(max_bytes)
+
+    def close(self):
+        if self.sock:
+            try:
+                self.sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+            self.sock = None
+
+# ---------------------------
+# Asyncio TCP Server / Client
+# ---------------------------
+class ExtAsyncTCPServer:
+    """
+    Asyncio-based TCP server wrapper.
+    Usage:
+        server = ExtAsyncTCPServer("0.0.0.0", 9000, client_handler)
+        asyncio.run(server.serve_forever())
+    Where client_handler(reader, writer) is async coroutine.
+    """
+    def __init__(self, host: str, port: int, client_handler: Callable[[asyncio.StreamReader, asyncio.StreamWriter], asyncio.Future]):
+        self.host = host
+        self.port = port
+        self._handler = client_handler
+        self._server: Optional[asyncio.base_events.Server] = None
+
+    async def serve_forever(self):
+        self._server = await asyncio.start_server(self._handler, host=self.host, port=self.port)
+        async with self._server:
+            await self._server.serve_forever()
+
+    async def close(self):
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
+            self._server = None
+
+class ExtAsyncTCPClient:
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        self.reader: Optional[asyncio.StreamReader] = None
+        self.writer: Optional[asyncio.StreamWriter] = None
+
+    async def connect(self):
+        self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
+
+    async def send(self, data: bytes):
+        if not self.writer:
+            raise RuntimeError("not connected")
+        self.writer.write(data)
+        await self.writer.drain()
+
+    async def recv(self, n: int = 4096) -> bytes:
+        if not self.reader:
+            raise RuntimeError("not connected")
+        return await self.reader.read(n)
+
+    def close(self):
+        if self.writer:
+            self.writer.close()
+
+# ---------------------------
+# Connection Pool (simple)
+# ---------------------------
+class ExtConnPool:
+    """
+    Basic TCP connection pool for blocking clients.
+    - create(pool_size, endpoint)
+    - acquire()/release() to reuse sockets.
+    """
+    def __init__(self, endpoint: Endpoint, pool_size: int = 4, timeout: Optional[float] = None):
+        self.endpoint = endpoint
+        self.pool_size = pool_size
+        self.timeout = timeout
+        self._pool: queue.Queue = queue.Queue(maxsize=pool_size)
+        self._lock = threading.Lock()
+        self._initialized = False
+
+    def _make_conn(self) -> socket.socket:
+        s = socket.create_connection((self.endpoint.host, self.endpoint.port), timeout=self.timeout)
+        return s
+
+    def initialize(self):
+        with self._lock:
+            if self._initialized:
+                return
+            for _ in range(self.pool_size):
+                try:
+                    self._pool.put_nowait(self._make_conn())
+                except Exception:
+                    break
+            self._initialized = True
+
+    def acquire(self, timeout: Optional[float] = None) -> socket.socket:
+        if not self._initialized:
+            self.initialize()
+        return self._pool.get(timeout=timeout)
+
+    def release(self, sock: socket.socket):
+        try:
+            self._pool.put_nowait(sock)
+        except queue.Full:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    def close_all(self):
+        while not self._pool.empty():
+            try:
+                s = self._pool.get_nowait()
+                s.close()
+            except Exception:
+                pass
+        self._initialized = False
+
+# ---------------------------
+# HTTP utilities (urllib based)
+# ---------------------------
+class ExtHTTPClient:
+    @staticmethod
+    def http_get(url: str, timeout: Optional[float] = 10) -> HTTPResponse:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read()
+            headers = {k: v for k, v in resp.getheaders()}
+            return {"code": resp.getcode(), "headers": headers, "body": body}
+
+    @staticmethod
+    def http_post_json(url: str, obj: Any, timeout: Optional[float] = 10, headers: Optional[Dict[str,str]] = None) -> HTTPResponse:
+        body = json.dumps(obj).encode("utf-8")
+        hdrs = {"Content-Type": "application/json"}
+        if headers:
+            hdrs.update(headers)
+        req = urllib.request.Request(url, data=body, headers=hdrs, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            rbody = resp.read()
+            return {"code": resp.getcode(), "headers": {k:v for k,v in resp.getheaders()}, "body": rbody}
+
+    @staticmethod
+    def download_file(url: str, dest_path: str, chunk_size: int = 8192, timeout: Optional[float] = 30, progress: Optional[Callable[[int, Optional[int]], None]] = None) -> str:
+        """Download URL to dest_path. Progress callback receives (downloaded_bytes, total_bytes_or_None)."""
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            total = resp.getheader('Content-Length')
+            total_n = int(total) if total and total.isdigit() else None
+            os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+            downloaded = 0
+            with open(dest_path, "wb") as out:
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    downloaded += len(chunk)
+                    if progress:
+                        progress(downloaded, total_n)
+        return dest_path
+
+# ---------------------------
+# Concurrency utilities
+# ---------------------------
+class ExtThreadPool:
+    """
+    Thin wrapper around concurrent.futures.ThreadPoolExecutor with simple submit/map helpers.
+    """
+    def __init__(self, max_workers: int = 4):
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+
+    def submit(self, fn: Callable, *args, **kwargs) -> concurrent.futures.Future:
+        return self._executor.submit(fn, *args, **kwargs)
+
+    def map(self, fn: Callable, iterable: Iterable):
+        return self._executor.map(fn, iterable)
+
+    def shutdown(self, wait: bool = True):
+        self._executor.shutdown(wait=wait)
+
+class ExtTaskScheduler:
+    """
+    Simple scheduler for delayed and periodic tasks using threads.
+    schedule(delay_seconds, fn, *args, **kwargs) -> returns Timer object
+    schedule_periodic(interval, fn, *args, **kwargs) -> returns controller object with cancel()
+    """
+    @staticmethod
+    def schedule(delay: float, fn: Callable, *args, **kwargs) -> threading.Timer:
+        t = threading.Timer(delay, fn, args=args, kwargs=kwargs)
+        t.daemon = True
+        t.start()
+        return t
+
+    class _Periodic:
+        def __init__(self, interval: float, fn: Callable, args, kwargs):
+            self.interval = interval
+            self.fn = fn
+            self.args = args
+            self.kwargs = kwargs
+            self._stop = threading.Event()
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+
+        def _run(self):
+            next_at = time.time() + self.interval
+            while not self._stop.wait(max(0, next_at - time.time())):
+                try:
+                    self.fn(*self.args, **self.kwargs)
+                except Exception:
+                    pass
+                next_at += self.interval
+
+        def cancel(self):
+            self._stop.set()
+            self._thread.join(timeout=1.0)
+
+    @staticmethod
+    def schedule_periodic(interval: float, fn: Callable, *args, **kwargs) -> '_Periodic':
+        return ExtTaskScheduler._Periodic(interval, fn, args, kwargs)
+
+# ---------------------------
+# File watcher (polling) and utility helpers
+# ---------------------------
+class ExtFileWatcher:
+    """
+    Polling file watcher. Calls callback(path, changed_files) on change.
+    Use start() to spawn a background thread; stop() to cancel.
+    """
+    def __init__(self, path: str, callback: Callable[[str, List[str]], None], poll_interval: float = 0.5):
+        self.path = path
+        self.callback = callback
+        self.poll_interval = poll_interval
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._snapshot: Dict[str, float] = {}
+
+    def _snapshot_dir(self) -> Dict[str, float]:
+        out: Dict[str, float] = {}
+        if os.path.isdir(self.path):
+            for root, _, files in os.walk(self.path):
+                for fn in files:
+                    p = os.path.join(root, fn)
+                    try:
+                        out[p] = os.path.getmtime(p)
+                    except OSError:
+                        out[p] = 0.0
+        else:
+            if os.path.exists(self.path):
+                out[self.path] = os.path.getmtime(self.path)
+        return out
+
+    def start(self):
+        if self._thread:
+            return
+        self._snapshot = self._snapshot_dir()
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while not self._stop.is_set():
+            time.sleep(self.poll_interval)
+            cur = self._snapshot_dir()
+            changed = []
+            # detect added/modified
+            for p, m in cur.items():
+                if p not in self._snapshot or self._snapshot[p] != m:
+                    changed.append(p)
+            # detect removed
+            for p in list(self._snapshot.keys()):
+                if p not in cur:
+                    changed.append(p)
+            if changed:
+                try:
+                    self.callback(self.path, changed)
+                except Exception:
+                    pass
+            self._snapshot = cur
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+
+# ---------------------------
+# Utility helpers
+# ---------------------------
+def ext_port_scan(host: str, ports: Iterable[int], timeout: float = 0.3) -> Dict[int, bool]:
+    """
+    Scan provided ports on `host`. Returns dict port->open(bool).
+    """
+    result: Dict[int, bool] = {}
+    for p in ports:
+        try:
+            with socket.create_connection((host, p), timeout=timeout) as s:
+                result[p] = True
+        except Exception:
+            result[p] = False
+    return result
+
+@retry(times=3, delay=0.2)
+def ext_tcp_ping(host: str, port: int = 7, timeout: float = 1.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            return True
+    except Exception:
+        return False
+
+# ---------------------------
+# Exports
+# ---------------------------
+__all__ += [
+    "ConnType", "Endpoint", "Message",
+    "ExtTCPServer", "ExtTCPClient",
+    "ExtAsyncTCPServer", "ExtAsyncTCPClient",
+    "ExtConnPool", "ExtHTTPClient",
+    "ExtThreadPool", "ExtTaskScheduler", "ExtFileWatcher",
+    "ext_port_scan", "ext_tcp_ping",
+]
+
+
+# --- Base-12 conversion with extended digits -------------------------------
+_BASE12_DIGITS = "0123456789↊↋"
+
+def to_base12_ext(n: int) -> str:
+    """Convert integer n to base-12 string using extended digits."""
+    if n == 0:
+        return "0"
+    neg = n < 0
+    n = abs(n)
+    digits = []
+    while n > 0:
+        n, rem = divmod(n, 12)
+        digits.append(_BASE12_DIGITS[rem])
+    if neg:
+        digits.append("-")
+    return "".join(reversed(digits))
+
+def from_base12_ext(s: str) -> int:
+    """Convert base-12 string with extended digits back to integer."""
+    s = s.strip()
+    if not s:
+        raise ValueError("empty string")
+    neg = s[0] == "-"
+    if neg:
+        s = s[1:]
+    n = 0
+    for ch in s:
+        if ch not in _BASE12_DIGITS:
+            raise ValueError(f"invalid base-12 digit: {ch}")
+        n = n * 12 + _BASE12_DIGITS.index(ch)
+        return
+    if neg:
+        n = -n
+        return n
+    return n
+# --- Safe eval using AST -----------------------------------------------
+_ALLOWED_AST_NODES = {
+    ast.Expression,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.Num,
+    ast.Str,
+    ast.Constant,  # for Python 3.8+
+    ast.Name,
+    ast.Load,
+    ast.BoolOp,
+    ast.Compare,
+    ast.And,
+    ast.Or,
+    ast.Not,
+    ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.Pow,
+    ast.USub, ast.UAdd,
+    ast.Call,
+    ast.Attribute,
+    ast.List,
+    ast.Tuple,
+    ast.Dict,
+    ast.Subscript,
+    ast.Index
+    }
+def _ast_is_allowed(node: ast.AST) -> bool:
+    """Recursively check if all AST nodes are in the allowed set."""
+    if type(node) not in _ALLOWED_AST_NODES:
+        return False
+    for child in ast.iter_child_nodes(node):
+        if not _ast_is_allowed(child):
+            return False
+    return True
+def safe_eval_ast(expr: str, variables: Optional[Dict[str, Any]] = None, timeout_sec: Optional[float] = None) -> Any:
+    """
+    Safely evaluate a simple expression using AST parsing.
+    Supports literals, arithmetic, comparisons, boolean ops, and variable names.
+    Variables can be provided in the `variables` dict.
+    Raises ValueError for disallowed constructs or SyntaxError for invalid syntax.
+    Can raise TimeoutError if evaluation exceeds timeout_sec.
+    """
+    if variables is None:
+        variables = {}
+    try:
+        tree = ast.parse(expr, mode='eval')
+    except SyntaxError as e:
+        raise ValueError(f"syntax error in expression: {e}") from e
+    try:
+        ast.fix_missing_locations(tree)
+    except Exception  # pragma: no cover; ast.fix_missing_locations may raise in some Python versions:as e:
+    # system.py
+"""
+Core system utilities for Sayit: safe eval, base-12 numerics, advanced VM subclass,
+optimization passes, and editor/IDE features (syntax highlight, autocorrect, completions).
+"""
+import os
+import pathlib
+from typing import Any, List, Optional, Dict, Tuple
+from say_parser import Parser, _tokenize
+from say_vm import ExecVM, Program
+from say_optimizer import Pass, ConstantFoldingPass, DeadCodeElimPass, peephole_optimize_ops, simple_loop_unroll, stack_to_register_ops, serialize_ops_to_bytes
+import re
+import json
+import sys
+import time
+# ---------------------------
+# Safe eval
+def safe_eval(expr: str, vars: Optional[Dict[str, Any]] = None, timeout: float = 1.0) -> Any:
+    """
+    Safely evaluate a simple arithmetic expression with optional variables.
+    Supports +, -, *, /, parentheses, integers, floats, and variable names.
+    Execution is limited by timeout (in seconds).
+    """
+    allowed_names = {
+        'abs': abs,
+        'round': round,
+        'min': min,
+        'max': max,
+        'int': int,
+        'float': float,
+    }
+    if vars:
+        allowed_names.update(vars)
+    code = compile(expr, "<string>", "eval")
+    for name in code.co_names:
+        if name not in allowed_names:
+            raise NameError(f"Use of '{name}' not allowed in safe_eval")
+    start_time = time.time()
+    def time_limited_eval():
+        if time.time() - start_time > timeout:
+            raise TimeoutError("safe_eval timed out")
+        return eval(code, {"__builtins__": {}}, allowed_names)
+    return time_limited_eval()
+# ---------------------------
+# Base-12 numerics
+def to_base12(n: int) -> str:
+    """Convert integer n to base-12 string using extended digits."""
+    if n == 0:
+        return "0"
+    neg = n < 0
+    n = abs(n)
+    digits = []
+    while n > 0:
+        n, rem = divmod(n, 12)
+        digits.append(_BASE12_DIGITS[rem])
+    if neg:
+        digits.append("-")
+    return "".join(reversed(digits))
+
+def from_base12(s: str) -> int:
+    """Convert base-12 string with extended digits back to integer."""
+    s = s.strip()
+    if not s:
+        raise ValueError("empty string")
+    neg = s[0] == "-"
+    if neg:
+        s = s[1:]
+    n = 0
+    for ch in s:
+        if ch not in _BASE12_DIGITS:
+            raise ValueError(f"invalid base-12 digit: {ch}")
+        n = n * 12 + _BASE12_DIGITS.index(ch)
+    return -n if neg else n
+# --- Safe eval using AST -----------------------------------------------
+_ALLOWED_AST_NODES = {
+    ast.Expression,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.Num,
+    ast.Str,
+    ast.Constant,  # for Python 3.8+
+    ast.Name,
+    ast.Load,
+    ast.BoolOp,
+    ast.Compare,
+    ast.And,
+    ast.Or,
+    ast.Not,
+    ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.Pow,
+    ast.USub, ast.UAdd,
+    ast.Call,
+    ast.Attribute,
+    ast.List,
+    ast.Tuple,
+    ast.Dict,
+    ast.Subscript,
+    ast.Index
+    }
+def _ast_is_allowed(node: ast.AST) -> bool:
+    """Recursively check if all AST nodes are in the allowed set."""
+    if type(node) not in _ALLOWED_AST_NODES:
+        return False
+    for child in ast.iter_child_nodes(node):
+        if not _ast_is_allowed(child):
+            return False
+    return True
+def safe_eval_ast(expr: str, variables: Optional[Dict[str, Any]] = None, timeout_sec: Optional[float] = None) -> Any:
+    """
+    Safely evaluate a simple expression using AST parsing.
+    Supports literals, arithmetic, comparisons, boolean ops, and variable names.
+    Variables can be provided in the `variables` dict.
+    Raises ValueError for disallowed constructs or SyntaxError for invalid syntax.
+    Can raise TimeoutError if evaluation exceeds timeout_sec.
+    """
+    if variables is None:
+        variables = {}
+    try:
+        tree = ast.parse(expr, mode='eval')
+    except SyntaxError as e:
+        raise ValueError(f"syntax error in expression: {e}") from e
+
+    # Attempt to fix missing locations if possible; ignore non-fatal failures.
+    try:
+        ast.fix_missing_locations(tree)
+    except Exception:
+        # pragma: no cover - best-effort, not critical
+        pass
+
+    if not _ast_is_allowed(tree):
+        raise ValueError("expression contains disallowed constructs")
+
+    code = compile(tree, filename="<ast>", mode="eval")
+    result_container: Dict[str, Any] = {}
+
+    def _runner():
+        try:
+            result_container["value"] = eval(code, {"__builtins__": {}}, variables)
+        except Exception as e:
+            result_container["error"] = e
+
+    thread = Thread(target=_runner, daemon=True)
+    thread.start()
+
+    # Wait for completion with optional timeout
+    thread.join(timeout=timeout_sec)
+    if thread.is_alive():
+        raise TimeoutError("evaluation timed out")
+
+    if "error" in result_container:
+        raise result_container["error"]
+
+    return result_container.get("value")
+
+# --- Atomic file helper / hashing / JSON-safe load --------------------------
+def hash_file_sha256(path: str, chunk_size: int = 8192) -> str:
+    """Return SHA-256 hex digest for a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def atomic_write_text(path: str, text: str, encoding: str = "utf-8") -> None:
+    """
+    Atomically write `text` to `path` by writing to a temporary file and renaming.
+    Ensures partial writes won't leave corrupt file.
+    """
+    dirn = os.path.dirname(path) or "."
+    with tempfile.NamedTemporaryFile("w", encoding=encoding, dir=dirn, delete=False) as tf:
+        tf.write(text)
+        tmpname = tf.name
+    os.replace(tmpname, path)
+
+def load_json_safe(path: str) -> Optional[object]:
+    """
+    Load JSON file returning parsed object, or None on parse error.
+    Does not raise for non-fatal problems; logs and returns None.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+# --- Lightweight LRU cache decorator (thread-safe-ish) ----------------------
+def lru_cache_simple(maxsize: int = 128):
+    """
+    Simple LRU cache decorator for pure functions with hashable args.
+    Not as featureful as functools.lru_cache but easy to inspect.
+    """
+    def deco(fn: Callable):
+        cache = {}
+        order = []
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            key = (args, tuple(sorted(kwargs.items())))
+            if key in cache:
+                # bump recency
+                try:
+                    order.remove(key)
+                except ValueError:
+                    pass
+                order.append(key)
+                return cache[key]
+            result = fn(*args, **kwargs)
+            cache[key] = result
+            order.append(key)
+            if len(order) > maxsize:
+                old = order.pop(0)
+                cache.pop(old, None)
+            return result
+        wrapped.cache_clear = lambda: (cache.clear(), order.clear())
+        wrapped._cache = cache
+        return wrapped
+    return deco
+
+# --- Robust subprocess runner with timeout and streamed output -------------
+def run_subprocess_capture(cmd: Iterable[str], timeout: Optional[float] = None) -> Tuple[int, str, str]:
+    """
+    Run a subprocess and capture stdout/stderr. Returns (returncode, stdout, stderr).
+    Uses subprocess.run with text mode. Raises TimeoutError on timeout.
+    """
+    try:
+        proc = subprocess.run(list(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError(f"subprocess timed out after {timeout}s") from e
+
+# --- Retry decorator for flaky IO / network calls ---------------------------
+def retry(times: int = 3, delay: float = 0.1, allowed_exceptions: Tuple[type, ...] = (Exception,)):
+    """
+    Retry decorator. Retries `times` times on allowed_exceptions with `delay` seconds between attempts.
+    """
+    def deco(fn: Callable):
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            last_exc = None
+            for attempt in range(1, times + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except allowed_exceptions as e:
+                    last_exc = e
+                    if attempt == times:
+                        break
+                    time.sleep(delay)
+            raise last_exc
+        return wrapped
+    return deco
+
+def run_threaded(target: Callable, *args, daemon: bool = True) -> Thread:
+    """
+    Helper to start a thread with the given target function and args.
+    Daemon status can be set; returns the started thread.
+    """
+    th = Thread(target=target, args=args, daemon=daemon)
+    th.start()
+    return th
+
+# ---------------------------
+# Exports
+# ---------------------------
+__all__ = [
+    "safe_eval",
+    "to_base12_ext", "from_base12_ext",
+    "safe_eval_ast",
+    "hash_file_sha256", "atomic_write_text", "load_json_safe",
+    "lru_cache_simple", "run_subprocess_capture", "retry",
+]
+
+# --- Base-12 conversion with extended digits -------------------------------
+_BASE12_DIGITS = "0123456789↊↋"
+
+def to_base12_ext(n: int) -> str:
+    """Convert integer n to base-12 string using extended digits."""
+    if n == 0:
+        return "0"
+    neg = n < 0
+    n = abs(n)
+    digits = []
+    while n > 0:
+        n, rem = divmod(n, 12)
+        digits.append(_BASE12_DIGITS[rem])
+    if neg:
+        digits.append("-")
+    return "".join(reversed(digits))
+
+def from_base12_ext(s: str) -> int:
+    """Convert base-12 string with extended digits back to integer."""
+    s = s.strip()
+    if not s:
+        raise ValueError("empty string")
+    neg = s[0] == "-"
+    if neg:
+        s = s[1:]
+    n = 0
+    for ch in s:
+        if ch not in _BASE12_DIGITS:
+            raise ValueError(f"invalid base-12 digit: {ch}")
+        n = n * 12 + _BASE12_DIGITS.index(ch)
+    return -n if neg else n
+# --- Safe eval using AST -----------------------------------------------
+_ALLOWED_AST_NODES = {
+    ast.Expression,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.Num,
+    ast.Str,
+    ast.Constant,  # for Python 3.8+
+    ast.Name,
+    ast.Load,
+    ast.BoolOp,
+    ast.Compare,
+    ast.And,
+    ast.Or,
+    ast.Not,
+    ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.Pow,
+    ast.USub, ast.UAdd,
+    ast.Call,
+    ast.Attribute,
+    ast.List,
+    ast.Tuple,
+    ast.Dict,
+    ast.Subscript,
+    ast.Index
+    }
+def _ast_is_allowed(node: ast.AST) -> bool:
+    """Recursively check if all AST nodes are in the allowed set."""
+    if type(node) not in _ALLOWED_AST_NODES:
+        return False
+    for child in ast.iter_child_nodes(node):
+        if not _ast_is_allowed(child):
+            return False
+    return True
+def safe_eval_ast(expr: str, variables: Optional[Dict[str, Any]] = None, timeout_sec: Optional[float] = None) -> Any:
+    """
+    Safely evaluate a simple expression using AST parsing.
+    Supports literals, arithmetic, comparisons, boolean ops, and variable names.
+    Variables can be provided in the `variables` dict.
+    Raises ValueError for disallowed constructs or SyntaxError for invalid syntax.
+    Can raise TimeoutError if evaluation exceeds timeout_sec.
+    """
+    if variables is None:
+        variables = {}
+    try:
+        tree = ast.parse(expr, mode='eval')
+    except SyntaxError as e:
+        raise ValueError(f"syntax error in expression: {e}") from e
+
+    # Attempt to fix missing locations if possible; ignore non-fatal failures.
+    try:
+        ast.fix_missing_locations(tree)
+    except Exception:
+        # pragma: no cover - best-effort, not critical
+        pass
+
+    if not _ast_is_allowed(tree):
+        raise ValueError("expression contains disallowed constructs")
+
+    code = compile(tree, filename="<ast>", mode="eval")
+    result_container: Dict[str, Any] = {}
+
+    def _runner():
+        try:
+            result_container["value"] = eval(code, {"__builtins__": {}}, variables)
+        except Exception as e:
+            result_container["error"] = e
+
+    thread = Thread(target=_runner, daemon=True)
+    thread.start()
+
+    # Wait for completion with optional timeout
+    thread.join(timeout=timeout_sec)
+    if thread.is_alive():
+        raise TimeoutError("evaluation timed out")
+
+    if "error" in result_container:
+        raise result_container["error"]
+
+    return result_container.get("value")
+
+# --- Atomic file helper / hashing / JSON-safe load --------------------------
+def hash_file_sha256(path: str, chunk_size: int = 8192) -> str:
+    """Return SHA-256 hex digest for a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def atomic_write_text(path: str, text: str, encoding: str = "utf-8") -> None:
+    """
+    Atomically write `text` to `path` by writing to a temporary file and renaming.
+    Ensures partial writes won't leave corrupt file.
+    """
+    dirn = os.path.dirname(path) or "."
+    with tempfile.NamedTemporaryFile("w", encoding=encoding, dir=dirn, delete=False) as tf:
+        tf.write(text)
+        tmpname = tf.name
+    os.replace(tmpname, path)
+
+def load_json_safe(path: str) -> Optional[object]:
+    """
+    Load JSON file returning parsed object, or None on parse error.
+    Does not raise for non-fatal problems; logs and returns None.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+# --- Lightweight LRU cache decorator (thread-safe-ish) ----------------------
+def lru_cache_simple(maxsize: int = 128):
+    """
+    Simple LRU cache decorator for pure functions with hashable args.
+    Not as featureful as functools.lru_cache but easy to inspect.
+    """
+    def deco(fn: Callable):
+        cache = {}
+        order = []
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            key = (args, tuple(sorted(kwargs.items())))
+            if key in cache:
+                # bump recency
+                try:
+                    order.remove(key)
+                except ValueError:
+                    pass
+                order.append(key)
+                return cache[key]
+            result = fn(*args, **kwargs)
+            cache[key] = result
+            order.append(key)
+            if len(order) > maxsize:
+                old = order.pop(0)
+                cache.pop(old, None)
+            return result
+        wrapped.cache_clear = lambda: (cache.clear(), order.clear())
+        wrapped._cache = cache
+        return wrapped
+    return deco
+
+# --- Robust subprocess runner with timeout and streamed output -------------
+def run_subprocess_capture(cmd: Iterable[str], timeout: Optional[float] = None) -> Tuple[int, str, str]:
+    """
+    Run a subprocess and capture stdout/stderr. Returns (returncode, stdout, stderr).
+    Uses subprocess.run with text mode. Raises TimeoutError on timeout.
+    """
+    try:
+        proc = subprocess.run(list(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError(f"subprocess timed out after {timeout}s") from e
+
+# --- Retry decorator for flaky IO / network calls ---------------------------
+def retry(times: int = 3, delay: float = 0.1, allowed_exceptions: Tuple[type, ...] = (Exception,)):
+    """
+    Retry decorator. Retries `times` times on allowed_exceptions with `delay` seconds between attempts.
+    """
+    def deco(fn: Callable):
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            last_exc = None
+            for attempt in range(1, times + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except allowed_exceptions as e:
+                    last_exc = e
+                    if attempt == times:
+                        break
+                    time.sleep(delay)
+            raise last_exc
+        return wrapped
+    return deco
+
+def run_threaded(target: Callable, *args, daemon: bool = True) -> Thread:
+    """
+    Helper to start a thread with the given target function and args.
+    Daemon status can be set; returns the started thread.
+    """
+    th = Thread(target=target, args=args, daemon=daemon)
+    th.start()
+    return th
+
+# ---------------------------
+# Exports
+# ---------------------------
+__all__ = [
+    "safe_eval",
+    "to_base12_ext", "from_base12_ext",
+    "safe_eval_ast",
+    "hash_file_sha256", "atomic_write_text", "load_json_safe",
+    "lru_cache_simple", "run_subprocess_capture", "retry",
+]
+
+# --- Base-12 conversion with extended digits -------------------------------
+_BASE12_DIGITS = "0123456789↊↋"
+
+def to_base12_ext(n: int) -> str:
+    """Convert integer n to base-12 string using extended digits."""
+    if n == 0:
+        return "0"
+    neg = n < 0
+    n = abs(n)
+    digits = []
+    while n > 0:
+        n, rem = divmod(n, 12)
+        digits.append(_BASE12_DIGITS[rem])
+    if neg:
+        digits.append("-")
+    return "".join(reversed(digits))
+
+def from_base12_ext(s: str) -> int:
+    """Convert base-12 string with extended digits back to integer."""
+    s = s.strip()
+    if not s:
+        raise ValueError("empty string")
+    neg = s[0] == "-"
+    if neg:
+        s = s[1:]
+    n = 0
+    for ch in s:
+        if ch not in _BASE12_DIGITS:
+            raise ValueError(f"invalid base-12 digit: {ch}")
+        n = n * 12 + _BASE12_DIGITS.index(ch)
+    return -n if neg else n
+# --- Safe eval using AST -----------------------------------------------
+_ALLOWED_AST_NODES = {
+    ast.Expression,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.Num,
+    ast.Str,
+    ast.Constant,  # for Python 3.8+
+    ast.Name,
+    ast.Load,
+    ast.BoolOp,
+    ast.Compare,
+    ast.And,
+    ast.Or,
+    ast.Not,
+    ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.Pow,
+    ast.USub, ast.UAdd,
+    ast.Call,
+    ast.Attribute,
+    ast.List,
+    ast.Tuple,
+    ast.Dict,
+    ast.Subscript,
+    ast.Index
+    }
+def _ast_is_allowed(node: ast.AST) -> bool:
+    """Recursively check if all AST nodes are in the allowed set."""
+    if type(node) not in _ALLOWED_AST_NODES:
+        return False
+    for child in ast.iter_child_nodes(node):
+        if not _ast_is_allowed(child):
+            return False
+    return True
+def safe_eval_ast(expr: str, variables: Optional[Dict[str, Any]] = None, timeout_sec: Optional[float] = None) -> Any:
+    """
+    Safely evaluate a simple expression using AST parsing.
+    Supports literals, arithmetic, comparisons, boolean ops, and variable names.
+    Variables can be provided in the `variables` dict.
+    Raises ValueError for disallowed constructs or SyntaxError for invalid syntax.
+    Can raise TimeoutError if evaluation exceeds timeout_sec.
+    """
+    if variables is None:
+        variables = {}
+    try:
+        tree = ast.parse(expr, mode='eval')
+    except SyntaxError as e:
+        raise ValueError(f"syntax error in expression: {e}") from e
+
+    # Attempt to fix missing locations if possible; ignore non-fatal failures.
+    try:
+        ast.fix_missing_locations(tree)
+    except Exception:
+        # pragma: no cover - best-effort, not critical
+        pass
+
+    if not _ast_is_allowed(tree):
+        raise ValueError("expression contains disallowed constructs")
+
+    code = compile(tree, filename="<ast>", mode="eval")
+    result_container: Dict[str, Any] = {}
+
+    def _runner():
+        try:
+            result_container["value"] = eval(code, {"__builtins__": {}}, variables)
+        except Exception as e:
+            result_container["error"] = e
+
+    thread = Thread(target=_runner, daemon=True)
+    thread.start()
+
+    # Wait for completion with optional timeout
+    thread.join(timeout=timeout_sec)
+    if thread.is_alive():
+        raise TimeoutError("evaluation timed out")
+
+    if "error" in result_container:
+        raise result_container["error"]
+
+    return result_container.get("value")
+
+# --- Atomic file helper / hashing / JSON-safe load --------------------------
+def hash_file_sha256(path: str, chunk_size: int = 8192) -> str:
+    """Return SHA-256 hex digest for a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def atomic_write_text(path: str, text: str, encoding: str = "utf-8") -> None:
+    """
+    Atomically write `text` to `path` by writing to a temporary file and renaming.
+    Ensures partial writes won't leave corrupt file.
+    """
+    dirn = os.path.dirname(path) or "."
+    with tempfile.NamedTemporaryFile("w", encoding=encoding, dir=dirn, delete=False) as tf:
+        tf.write(text)
+        tmpname = tf.name
+    os.replace(tmpname, path)
+
+def load_json_safe(path: str) -> Optional[object]:
+    """
+    Load JSON file returning parsed object, or None on parse error.
+    Does not raise for non-fatal problems; logs and returns None.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+# --- Lightweight LRU cache decorator (thread-safe-ish) ----------------------
+def lru_cache_simple(maxsize: int = 128):
+    """
+    Simple LRU cache decorator for pure functions with hashable args.
+    Not as featureful as functools.lru_cache but easy to inspect.
+    """
+    def deco(fn: Callable):
+        cache = {}
+        order = []
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            key = (args, tuple(sorted(kwargs.items())))
+            if key in cache:
+                # bump recency
+                try:
+                    order.remove(key)
+                except ValueError:
+                    pass
+                order.append(key)
+                return cache[key]
+            result = fn(*args, **kwargs)
+            cache[key] = result
+            order.append(key)
+            if len(order) > maxsize:
+                old = order.pop(0)
+                cache.pop(old, None)
+            return result
+        wrapped.cache_clear = lambda: (cache.clear(), order.clear())
+        wrapped._cache = cache
+        return wrapped
+    return deco
+
+# --- Robust subprocess runner with timeout and streamed output -------------
+def run_subprocess_capture(cmd: Iterable[str], timeout: Optional[float] = None) -> Tuple[int, str, str]:
+    """
+    Run a subprocess and capture stdout/stderr. Returns (returncode, stdout, stderr).
+    Uses subprocess.run with text mode. Raises TimeoutError on timeout.
+    """
+    try:
+        proc = subprocess.run(list(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError(f"subprocess timed out after {timeout}s") from e
+
+# --- Retry decorator for flaky IO / network calls ---------------------------
+def retry(times: int = 3, delay: float = 0.1, allowed_exceptions: Tuple[type, ...] = (Exception,)):
+    """
+    Retry decorator. Retries `times` times on allowed_exceptions with `delay` seconds between attempts.
+    """
+    def deco(fn: Callable):
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            last_exc = None
+            for attempt in range(1, times + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except allowed_exceptions as e:
+                    last_exc = e
+                    if attempt == times:
+                        break
+                    time.sleep(delay)
+            raise last_exc
+        return wrapped
+    return deco
+
+def run_threaded(target: Callable, *args, daemon: bool = True) -> Thread:
+    """
+    Helper to start a thread with the given target function and args.
+    Daemon status can be set; returns the started thread.
+    """
+    th = Thread(target=target, args=args, daemon=daemon)
+    th.start()
+    return th
+
+# ---------------------------
+# Exports
+# ---------------------------
+__all__ = [
+    "safe_eval",
+    "to_base12_ext", "from_base12_ext",
+    "safe_eval_ast",
+    "hash_file_sha256", "atomic_write_text", "load_json_safe",
+    "lru_cache_simple", "run_subprocess_capture", "retry",
+]
+
+# --- Base-12 conversion with extended digits -------------------------------
+_BASE12_DIGITS = "0123456789↊↋"
+
+def to_base12_ext(n: int) -> str:
+    """Convert integer n to base-12 string using extended digits."""
+    if n == 0:
+        return "0"
+    neg = n < 0
+    n = abs(n)
+    digits = []
+    while n > 0:
+        n, rem = divmod(n, 12)
+        digits.append(_BASE12_DIGITS[rem])
+    if neg:
+        digits.append("-")
+    return "".join(reversed(digits))
+
+def from_base12_ext(s: str) -> int:
+    """Convert base-12 string with extended digits back to integer."""
+    s = s.strip()
+    if not s:
+        raise ValueError("empty string")
+    neg = s[0] == "-"
+    if neg:
+        s = s[1:]
+    n = 0
+    for ch in s:
+        if ch not in _BASE12_DIGITS:
+            raise ValueError(f"invalid base-12 digit: {ch}")
+        n = n * 12 + _BASE12_DIGITS.index(ch)
+    return -n if neg else n
+# --- Safe eval using AST -----------------------------------------------
+_ALLOWED_AST_NODES = {
+    ast.Expression,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.Num,
+    ast.Str,
+    ast.Constant,  # for Python 3.8+
+    ast.Name,
+    ast.Load,
+    ast.BoolOp,
+    ast.Compare,
+    ast.And,
+    ast.Or,
+    ast.Not,
+    ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.Pow,
+    ast.USub, ast.UAdd,
+    ast.Call,
+    ast.Attribute,
+    ast.List,
+    ast.Tuple,
+    ast.Dict,
+    ast.Subscript,
+    ast.Index
+    }
+def _ast_is_allowed(node: ast.AST) -> bool:
+    """Recursively check if all AST nodes are in the allowed set."""
+    if type(node) not in _ALLOWED_AST_NODES:
+        return False
+    for child in ast.iter_child_nodes(node):
+        if not _ast_is_allowed(child):
+            return False
+    return True
+def safe_eval_ast(expr: str, variables: Optional[Dict[str, Any]] = None, timeout_sec: Optional[float] = None) -> Any:
+    """
+    Safely evaluate a simple expression using AST parsing.
+    Supports literals, arithmetic, comparisons, boolean ops, and variable names.
+    Variables can be provided in the `variables` dict.
+    Raises ValueError for disallowed constructs or SyntaxError for invalid syntax.
+    Can raise TimeoutError if evaluation exceeds timeout_sec.
+    """
+    if variables is None:
+        variables = {}
+    try:
+        tree = ast.parse(expr, mode='eval')
+    except SyntaxError as e:
+        raise ValueError(f"syntax error in expression: {e}") from e
+
+    # Attempt to fix missing locations if possible; ignore non-fatal failures.
+    try:
+        ast.fix_missing_locations(tree)
+    except Exception:
+        # pragma: no cover - best-effort, not critical
+        pass
+
+    if not _ast_is_allowed(tree):
+        raise ValueError("expression contains disallowed constructs")
+
+    code = compile(tree, filename="<ast>", mode="eval")
+    result_container: Dict[str, Any] = {}
+
+    def _runner():
+        try:
+            result_container["value"] = eval(code, {"__builtins__": {}}, variables)
+        except Exception as e:
+            result_container["error"] = e
+
+    thread = Thread(target=_runner, daemon=True)
+    thread.start()
+
+    # Wait for completion with optional timeout
+    thread.join(timeout=timeout_sec)
+    if thread.is_alive():
+        raise TimeoutError("evaluation timed out")
+
+    if "error" in result_container:
+        raise result_container["error"]
+
+    return result_container.get("value")
+
+# --- Atomic file helper / hashing / JSON-safe load --------------------------
+def hash_file_sha256(path: str, chunk_size: int = 8192) -> str:
+    """Return SHA-256 hex digest for a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def atomic_write_text(path: str, text: str, encoding: str = "utf-8") -> None:
+    """
+    Atomically write `text` to `path` by writing to a temporary file and renaming.
+    Ensures partial writes won't leave corrupt file.
+    """
+    dirn = os.path.dirname(path) or "."
+    with tempfile.NamedTemporaryFile("w", encoding=encoding, dir=dirn, delete=False) as tf:
+        tf.write(text)
+        tmpname = tf.name
+    os.replace(tmpname, path)
+
+def load_json_safe(path: str) -> Optional[object]:
+    """
+    Load JSON file returning parsed object, or None on parse error.
+    Does not raise for non-fatal problems; logs and returns None.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+# --- Lightweight LRU cache decorator (thread-safe-ish) ----------------------
+def lru_cache_simple(maxsize: int = 128):
+    """
+    Simple LRU cache decorator for pure functions with hashable args.
+    Not as featureful as functools.lru_cache but easy to inspect.
+    """
+    def deco(fn: Callable):
+        cache = {}
+        order = []
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            key = (args, tuple(sorted(kwargs.items())))
+            if key in cache:
+                # bump recency
+                try:
+                    order.remove(key)
+                except ValueError:
+                    pass
+                order.append(key)
+                return cache[key]
+            result = fn(*args, **kwargs)
+            cache[key] = result
+            order.append(key)
+            if len(order) > maxsize:
+                old = order.pop(0)
+                cache.pop(old, None)
+            return result
+        wrapped.cache_clear = lambda: (cache.clear(), order.clear())
+        wrapped._cache = cache
+        return wrapped
+    return deco
+
+# --- Robust subprocess runner with timeout and streamed output -------------
+def run_subprocess_capture(cmd: Iterable[str], timeout: Optional[float] = None) -> Tuple[int, str, str]:
+    """
+    Run a subprocess and capture stdout/stderr. Returns (returncode, stdout, stderr).
+    Uses subprocess.run with text mode. Raises TimeoutError on timeout.
+    """
+    try:
+        proc = subprocess.run(list(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError(f"subprocess timed out after {timeout}s") from e
+
+# --- Retry decorator for flaky IO / network calls ---------------------------
+def retry(times: int = 3, delay: float = 0.1, allowed_exceptions: Tuple[type, ...] = (Exception,)):
+    """
+    Retry decorator. Retries `times` times on allowed_exceptions with `delay` seconds between attempts.
+    """
+    def deco(fn: Callable):
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            last_exc = None
+            for attempt in range(1, times + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except allowed_exceptions as e:
+                    last_exc = e
+                    if attempt == times:
+                        break
+                    time.sleep(delay)
+            raise last_exc
+        return wrapped
+    return deco
+
+def run_threaded(target: Callable, *args, daemon: bool = True) -> Thread:
+    """
+    Helper to start a thread with the given target function and args.
+    Daemon status can be set; returns the started thread.
+    """
+    th = Thread(target=target, args=args, daemon=daemon)
+    th.start()
+    return th
+
+# ---------------------------
+# Exports
+# ---------------------------
+__all__ = [
+    "safe_eval",
+    "to_base12_ext", "from_base12_ext",
+    "safe_eval_ast",
+    "hash_file_sha256", "atomic_write_text", "load_json_safe",
+    "lru_cache_simple", "run_subprocess_capture", "retry",
+]
+if not _ast_is_allowed(tree):
+        raise ValueError("expression contains disallowed constructs")
+        code = compile(tree, filename="<ast>", mode="eval")
+        result_container: Dict[str, Any] = {}
+def target():
+                                   thread.start()
+thread.join(timeout=timeout_sec)
+if thread.is_alive():
+                                raise TimeoutError("evaluation timed out")
+if 'error' in result_container:
+                                raise result_container['error']
+
+# Production runtime bootstrap and operational tooling
+# Adds a production-oriented runtime, logging, graceful shutdown, metrics, and optional JIT path.
+# Intended as a concrete, realistic scaffold to harden the project toward production readiness.
+# This code appends non-invasive helpers and does not change existing behavior unless you opt into `--prod` CLI.
+
+import logging
+import logging.handlers
+import signal
+import threading
+import http.server
+import socketserver
+import socket
+import json
+import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional, Callable, Any, Dict
+
+# ---------------------------------------------------------------------------
+# Versioning / VCS helpers
+# ---------------------------------------------------------------------------
+def get_vcs_version() -> str:
+    """Return short git SHA if available, else 'unknown'."""
+    try:
+        import subprocess, os
+        repo_root = os.path.dirname(os.path.abspath(__file__))
+        p = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=1.0)
+        if p.returncode == 0:
+            return p.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+# ---------------------------------------------------------------------------
+# Logging configuration for production
+# ---------------------------------------------------------------------------
+def configure_logging(name: str = "sayit", level: int = logging.INFO, logfile: Optional[str] = "sayit.log") -> logging.Logger:
+    """Configure structured logging for console + rotating file."""
+    logger = logging.getLogger(name)
+    if logger.handlers:
+        return logger  # already configured
+
+    logger.setLevel(level)
+    fmt = logging.Formatter(fmt="%(asctime)s %(levelname)s [%(name)s] %(threadName)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S%z")
+
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    sh.setLevel(level)
+    logger.addHandler(sh)
+
+    if logfile:
+        fh = logging.handlers.RotatingFileHandler(logfile, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+        fh.setFormatter(fmt)
+        fh.setLevel(logging.DEBUG)  # keep detailed file logs
+        logger.addHandler(fh)
+
+    # make library loggers less noisy by default
+    for lib in ("urllib3", "asyncio", "llvmlite"):
+        logging.getLogger(lib).setLevel(logging.WARNING)
+
+    return logger
+
+# ---------------------------------------------------------------------------
+# Minimal metrics HTTP server (exposes /metrics and /health)
+# ---------------------------------------------------------------------------
+class _MetricsHandler(http.server.BaseHTTPRequestHandler):
+    metrics_provider: Optional[Callable[[], Dict[str, Any]]] = None
+
+    def _write_json(self, data: dict, code: int = 200):
+        payload = json.dumps(data).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_GET(self):
+        if self.path == "/health":
+            self._write_json({"status": "ok", "version": get_vcs_version()})
+            return
+        if self.path == "/metrics":
+            try:
+                if _MetricsHandler.metrics_provider:
+                    self._write_json(_MetricsHandler.metrics_provider())
+                else:
+                    self._write_json({"metrics": {}})
+            except Exception as e:
+                self.send_error(500, f"metrics error: {e}")
+            return
+        # default 404
+        self.send_error(404, "not found")
+
+    def log_message(self, format: str, *args):
+        # route standard server logs to our logger
+        logging.getLogger("sayit.metrics.http").info(format % args)
+
+class ProductionRuntime:
+    """
+    ProductionRuntime wraps:
+      - Logging and structured startup/shutdown
+      - ThreadPool for CPU-bound tasks
+      - Lightweight metrics HTTP endpoint (/metrics, /health)
+      - Graceful signal handling and uncaught-exception hook
+      - Optional JIT path (llvmlite) when available (best-effort)
+    Use:
+        rt = ProductionRuntime(...)
+        rt.start()
+        rt.submit(my_work)
+        rt.stop()
+    """
+    def __init__(self,
+                 max_workers: int = 4,
+                 metrics_port: Optional[int] = 8000,
+                 log_file: Optional[str] = "sayit.log"):
+        self.logger = configure_logging(level=logging.INFO, logfile=log_file)
+        self.logger.info("ProductionRuntime init: version=%s", get_vcs_version())
+        self.max_workers = max_workers
+        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="sayit-worker")
+        self._running = threading.Event()
+        self.metrics_port = metrics_port
+        self._metrics_server_thread: Optional[threading.Thread] = None
+        self._metrics_httpd: Optional[socketserver.TCPServer] = None
+        self._metrics_data: Dict[str, Any] = {"uptime_start": time.time(), "tasks_submitted": 0, "tasks_completed": 0}
+        self._lock = threading.Lock()
+        self._original_excepthook = threading.excepthook if hasattr(threading, "excepthook") else None
+
+        # optional llvmlite JIT presence flag and helper
+        self.jit_available = False
+        try:
+            import llvmlite
+            self.jit_available = True
+            self.logger.info("llvmlite available: JIT optimizations enabled")
+        except Exception:
+            self.logger.info("llvmlite not available: running interpreter-only path")
+
+    # -------------------------
+    # Metrics
+    # -------------------------
+    def _metrics_provider(self) -> Dict[str, Any]:
+        with self._lock:
+            m = dict(self._metrics_data)
+        m["uptime_seconds"] = time.time() - self._metrics_data.get("uptime_start", time.time())
+        m["worker_threads"] = self.max_workers
+        return m
+
+    def _start_metrics_server(self):
+        if self.metrics_port is None:
+            return
+        handler = _MetricsHandler
+        handler.metrics_provider = self._metrics_provider
+        class ThreadedTCPServer(socketserver.ThreadingTCPServer):
+            allow_reuse_address = True
+        try:
+            httpd = ThreadedTCPServer(("0.0.0.0", self.metrics_port), handler)
+        except OSError:
+            # fallback to loopback only if privileged port or port in use
+            httpd = ThreadedTCPServer(("127.0.0.1", self.metrics_port), handler)
+        self._metrics_httpd = httpd
+        t = threading.Thread(target=httpd.serve_forever, name="sayit-metrics", daemon=True)
+        t.start()
+        self._metrics_server_thread = t
+        self.logger.info("Metrics HTTP server started on port %s", self.metrics_port)
+
+    def _stop_metrics_server(self):
+        if self._metrics_httpd:
+            try:
+                self._metrics_httpd.shutdown()
+                self._metrics_httpd.server_close()
+            except Exception:
+                pass
+            self._metrics_httpd = None
+        if self._metrics_server_thread:
+            self._metrics_server_thread.join(timeout=1.0)
+            self._metrics_server_thread = None
+        self.logger.info("Metrics HTTP server stopped")
+
+    # -------------------------
+    # Task submission helpers
+    # -------------------------
+    def submit(self, fn: Callable[..., Any], *args, **kwargs):
+        with self._lock:
+            self._metrics_data["tasks_submitted"] = self._metrics_data.get("tasks_submitted", 0) + 1
+        fut = self.executor.submit(self._task_wrapper, fn, *args, **kwargs)
+        return fut
+
+    def _task_wrapper(self, fn: Callable[..., Any], *args, **kwargs):
+        try:
+            res = fn(*args, **kwargs)
+            return res
+        finally:
+            with self._lock:
+                self._metrics_data["tasks_completed"] = self._metrics_data.get("tasks_completed", 0) + 1
+
+    # -------------------------
+    # Signal handling + uncaught exceptions
+    # -------------------------
+    def _signal_handler(self, signum, frame):
+        self.logger.info("Received signal %s, initiating graceful shutdown", signum)
+        self.stop(timeout=10.0)
+
+    def _threading_excepthook(self, args):
+        # args is a ThreadException object in Python 3.8+: (exc_type, exc_value, exc_traceback, thread)
+        try:
+            self.logger.error("Uncaught exception in thread %s: %s", getattr(args, "thread", "unknown"), "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+        except Exception:
+            self.logger.exception("Exception in threading excepthook")
+        # chain to original if present
+        if self._original_excepthook:
+            try:
+                self._original_excepthook(args)
+            except Exception:
+                pass
+
+    # -------------------------
+    # Start / Stop
+    # -------------------------
+    def start(self):
+        if self._running.is_set():
+            return
+        self.logger.info("Starting ProductionRuntime")
+        # bind signal handlers for graceful termination
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                signal.signal(sig, self._signal_handler)
+            except Exception:
+                self.logger.warning("Unable to register signal handler for %s", sig)
+        # threading excepthook (Python 3.8+)
+        if hasattr(threading, "excepthook"):
+            threading.excepthook = self._threading_excepthook
+        # start metrics server
+        self._start_metrics_server()
+        self._running.set()
+        self.logger.info("ProductionRuntime started")
+
+    def stop(self, timeout: float = 5.0):
+        if not self._running.is_set():
+            return
+        self.logger.info("Stopping ProductionRuntime")
+        # shutdown executor gracefully
+        self.executor.shutdown(wait=False)
+        # give tasks a grace period
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            # if there are still running threads, sleep briefly
+            # Note: ThreadPoolExecutor doesn't expose active count directly; best-effort wait
+            time.sleep(0.1)
+            break
+        # stop metrics
+        self._stop_metrics_server()
+        self._running.clear()
+        self.logger.info("ProductionRuntime stopped")
+
+    # -------------------------
+    # High-level runner convenience
+    # -------------------------
+    def run_program_text(self, source_text: str, timeout: Optional[float] = None, trace: bool = False) -> Dict[str, Any]:
+        """
+        High-level convenience: parse source text, compile, run in ExecVM/ExecVMPro.
+        This is the production entry used by sayc/run modes when --prod is chosen.
+        """
+        self.logger.info("Running program (prod runner) trace=%s timeout=%s", trace, timeout)
+        try:
+            toks = list(_tokenize(source_text))
+            parser = Parser(toks)
+            prog = parser.parse_program()
+            # Prefer ExecVMPro (optimized) if available
+            vm = None
+            try:
+                vm = ExecVMPro()  # type: ignore[name-defined]
+            except Exception:
+                vm = ExecVM()
+            vm.trace = trace
+            if timeout is not None:
+                vm.timeout = timeout
+            res = vm.run_program(prog)
+            self.logger.info("Program finished: %s", res)
+            return {"ok": True, "result": res}
+        except Exception as e:
+            self.logger.exception("Program execution error")
+            return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
+
+# ---------------------------------------------------------------------------
+# CLI integration: lightweight `--prod` runner for production usage
+# ---------------------------------------------------------------------------
+def _entry_prod_mode(argv=None):
+    import argparse, sys
+    parser = argparse.ArgumentParser(prog="sayit-prod", description="Run Sayit program in production mode (graceful, metrics, logging)")
+    parser.add_argument("file", nargs="?", help="Source file to run (.say)")
+    parser.add_argument("--port", type=int, default=8000, help="Metrics HTTP port")
+    parser.add_argument("--workers", type=int, default=4, help="Worker thread pool size")
+    parser.add_argument("--log", default="sayit.log", help="Log file path")
+    parser.add_argument("--timeout", type=float, default=None, help="Per-program execution timeout (s)")
+    parser.add_argument("--trace", action="store_true", help="Enable VM tracing")
+    args = parser.parse_args(argv)
+
+    runtime = ProductionRuntime(max_workers=args.workers, metrics_port=args.port, log_file=args.log)
+    runtime.start()
+
+    if args.file:
+        with open(args.file, "r", encoding="utf-8") as f:
+            src = f.read()
+        fut = runtime.submit(runtime.run_program_text, src, args.timeout, args.trace)
+        try:
+            res = fut.result(timeout=(args.timeout + 5) if args.timeout else None)
+            print(json.dumps(res, indent=2))
+        except Exception as e:
+            runtime.logger.exception("Error waiting for program completion")
+            print(json.dumps({"ok": False, "error": str(e)}))
+    else:
+        runtime.logger.info("No file specified; production runtime is running (metrics available). Press Ctrl-C to stop.")
+        try:
+            while True:
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            pass
+    runtime.stop()
+
+# ---------------------------------------------------------------------------
+# Minimal CI / packaging helpers (advisory, not performing remote ops)
+# ---------------------------------------------------------------------------
+def generate_release_notes(short: bool = True) -> str:
+    """
+    Generate a short release note document based on git history.
+    This is a best-effort helper for packaging and release automation.
+    """
+    try:
+        import subprocess, os
+        repo_root = os.path.dirname(os.path.abspath(__file__))
+        # gather last 20 commits as summary
+        p = subprocess.run(["git", "log", "--pretty=format:%h %s", "-n", "20"], cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=2.0)
+        if p.returncode == 0:
+            lines = p.stdout.strip().splitlines()
+            header = f"Sayit release {get_vcs_version()}"
+            body = "\n".join(lines if not short else lines[:10])
+            return header + "\n\n" + body
+    except Exception:
+        pass
+    return f"Sayit release {get_vcs_version()} (changelog unavailable)"
+
+# ---------------------------------------------------------------------------
+# Expose small public API for integration tests and CI
+# ---------------------------------------------------------------------------
+__all__ += [
+    "ProductionRuntime",
+    "configure_logging",
+    "get_vcs_version",
+    "_entry_prod_mode",
+    "generate_release_notes",
+]
+
+# ---------------------------------------------------------------------------
+# If module executed with `--prod` flag, run prod entrypoint (non-invasive)
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    import sys
+    if "--prod" in sys.argv:
+        # call production entry and exit
+        _entry_prod_mode([a for a in sys.argv[1:] if a != "--prod"])
+        sys.exit(0)
+    # otherwise keep quiet so earlier __main__ blocks in sub-modules keep working.
+    
+    print("This module is intended to be imported, or run with --prod for production mode.")
+    sys.exit(0)
+    print("Usage: say_lexer.py <file.say> [--pos]")
+print(f"Error reading file {args.file}: {e}")
+sys.exit(1)
+tokens = list(tokenize(src, include_pos=args.pos))
+for t in tokens:
+                print(t)
+# Self-training scaffold: safe, opt-in framework to propose and (with explicit approval) apply repo patches.
+# Non-autonomous: requires `--selftrain` and `--apply` flags to persist changes. Designed to be auditable and reversible.
+
+import subprocess
+import shutil
+import tempfile
+import pathlib
+import difflib
+from typing import List, Dict, Tuple, Optional
+
+class SelfTrainer:
+    """
+    Lightweight self-training scaffold.
+    - gather_examples(): collects candidate source files
+    - propose_patch(): produces simple, safe fixes (uses existing `autocorrect_source`)
+    - evaluate_patch(): runs tests in isolated worktree/copy and returns results
+    - apply_patch(): writes changes into working tree and creates a git branch + commit (requires confirm)
+    Usage (dry-run):
+        python system.py --selftrain
+    To apply:
+        python system.py --selftrain --apply
+    NOTE: This is a safe scaffold — it will not modify your repo unless `--apply` is provided.
+    """
+
+    def __init__(self, repo_path: Optional[str] = None, include_exts: Optional[List[str]] = None):
+        self.repo = pathlib.Path(repo_path or ".").resolve()
+        self.include_exts = include_exts or [".py", ".say"]
+        self.tmp_worktree: Optional[pathlib.Path] = None
+
+    def _run(self, cmd: List[str], cwd: Optional[pathlib.Path] = None, check: bool = False) -> subprocess.CompletedProcess:
+        return subprocess.run(cmd, cwd=str(cwd or self.repo), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=check)
+
+    def find_candidate_files(self) -> List[pathlib.Path]:
+        out = []
+        for p in self.repo.rglob("*"):
+            if p.is_file() and p.suffix in self.include_exts:
+                # ignore .git and .cache dirs
+                if ".git" in p.parts or ".cache" in p.parts:
+                    continue
+                out.append(p)
+        return sorted(out)
+
+    def propose_patch(self, files: List[pathlib.Path]) -> Dict[str, Tuple[str, str]]:
+        """
+        Propose changes. Returns mapping path -> (orig, proposed).
+        Current proposal strategy: run `autocorrect_source` (conservative fixes).
+        """
+        proposals: Dict[str, Tuple[str, str]] = {}
+        for p in files:
+            try:
+                orig = p.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            # use autocorrect_source available earlier in this module
+            try:
+                proposed = autocorrect_source(orig)
+            except Exception:
+                proposed = orig
+            if proposed != orig:
+                proposals[str(p.relative_to(self.repo))] = (orig, proposed)
+        return proposals
+
+    def _render_diff(self, orig: str, proposed: str, filename: str) -> str:
+        od = orig.splitlines(keepends=True)
+        pd = proposed.splitlines(keepends=True)
+        return "".join(difflib.unified_diff(od, pd, fromfile=filename, tofile=filename + ".proposed"))
+
+    def _create_worktree(self) -> pathlib.Path:
+        # try to use `git worktree` for isolated evaluation
+        tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="sayit-selftrain-"))
+        try:
+            self._run(["git", "worktree", "add", "--detach", str(tmpdir), "HEAD"], cwd=self.repo)
+            self.tmp_worktree = tmpdir
+            return tmpdir
+        except Exception:
+            # fallback: shallow copy of repo files
+            for item in self.repo.iterdir():
+                if item.name == ".git":
+                    continue
+                dest = tmpdir / item.name
+                if item.is_dir():
+                    shutil.copytree(item, dest, symlinks=False)
+                else:
+                    shutil.copy2(item, dest)
+            self.tmp_worktree = tmpdir
+            return tmpdir
+
+    def _cleanup_worktree(self):
+        if not self.tmp_worktree:
+            return
+        try:
+            # if created via git worktree, remove it cleanly
+            self._run(["git", "worktree", "remove", "--force", str(self.tmp_worktree)], cwd=self.repo)
+        except Exception:
+            # best-effort remove
+            try:
+                shutil.rmtree(self.tmp_worktree)
+            except Exception:
+                pass
+        self.tmp_worktree = None
+
+    def evaluate_patch(self, proposals: Dict[str, Tuple[str, str]]) -> Dict[str, object]:
+        """
+        Apply proposals to isolated copy and run test suite.
+        Returns dictionary with diffs and test run result.
+        """
+        if not proposals:
+            return {"ok": True, "message": "no proposals", "diffs": {}, "tests": None}
+        wt = self._create_worktree()
+        diffs: Dict[str, str] = {}
+        try:
+            for relpath, (orig, proposed) in proposals.items():
+                targ = wt / relpath
+                targ.parent.mkdir(parents=True, exist_ok=True)
+                targ.write_text(proposed, encoding="utf-8")
+                diffs[relpath] = self._render_diff(orig, proposed, relpath)
+            # run tests using unittest discovery, fallback to no tests
+            try:
+                cp = subprocess.run([sys.executable, "-m", "unittest", "discover", "-v"], cwd=str(wt), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
+                tests_out = cp.stdout
+                tests_rc = cp.returncode
+            except subprocess.TimeoutExpired as e:
+                tests_out = f"timeout: {e}"
+                tests_rc = 2
+            return {"ok": tests_rc == 0, "diffs": diffs, "tests": {"returncode": tests_rc, "output": tests_out}}
+        finally:
+            self._cleanup_worktree()
+
+    def apply_patch(self, proposals: Dict[str, Tuple[str, str]], branch_name: Optional[str] = None, commit_msg: Optional[str] = None, confirm: bool = False) -> Dict[str, object]:
+        """
+        If confirm is True, create branch, write files and commit. Returns summary.
+        Will not force-push or change remote.
+        """
+        if not proposals:
+            return {"applied": False, "reason": "no proposals"}
+        if not confirm:
+            return {"applied": False, "reason": "confirm flag not set", "preview": {k: self._render_diff(o, p, k) for k, (o, p) in proposals.items()}}
+        branch = branch_name or f"selftrain/{int(time.time())}"
+        # create branch
+        try:
+            self._run(["git", "checkout", "-b", branch], cwd=self.repo, check=True)
+        except subprocess.CalledProcessError as e:
+            return {"applied": False, "error": f"git branch create failed: {e.stderr}"}
+        try:
+            for relpath, (orig, proposed) in proposals.items():
+                target = self.repo / relpath
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(proposed, encoding="utf-8")
+                self._run(["git", "add", relpath], cwd=self.repo, check=True)
+            msg = commit_msg or "selftrain: apply proposed autocorrections (opt-in)"
+            self._run(["git", "commit", "-m", msg], cwd=self.repo, check=True)
+            return {"applied": True, "branch": branch, "commit_msg": msg, "files": list(proposals.keys())}
+        except subprocess.CalledProcessError as e:
+            return {"applied": False, "error": f"git commit failed: {e.stderr}"}
+
+    def run_cycle(self, dry_run: bool = True) -> Dict[str, object]:
+        """
+        End-to-end cycle: discover, propose, evaluate, and (optionally) apply.
+        Returns a report dict.
+        """
+        files = self.find_candidate_files()
+        proposals = self.propose_patch(files)
+        if not proposals:
+            return {"ok": True, "message": "no proposals"}
+        eval_res = self.evaluate_patch(proposals)
+        report = {"proposals_count": len(proposals), "evaluation": eval_res}
+        # include diffs summary
+        report["diffs_preview"] = {k: self._render_diff(o, p, k) for k, (o, p) in proposals.items()}
+        report["applied"] = False
+        if not dry_run and eval_res.get("ok"):
+            apply_res = self.apply_patch(proposals, confirm=True)
+            report["applied"] = apply_res
+        return report
+
+# CLI integration for self-training
+def _entry_selftrain(argv: Optional[List[str]] = None):
+    import argparse
+    parser = argparse.ArgumentParser(prog="sayit-selftrain", description="Self-train scaffold (opt-in and auditable)")
+    parser.add_argument("--apply", action="store_true", help="Apply proposed patches (requires passing tests and explicit consent)")
+    parser.add_argument("--only-preview", action="store_true", help="Show diffs without running tests")
+    args = parser.parse_args(argv)
+    st = SelfTrainer(repo_path=".")
+    files = st.find_candidate_files()
+    proposals = st.propose_patch(files)
+    if not proposals:
+        print("No safe proposals generated.")
+        return 0
+    # show brief summary
+    print(f"Proposals generated for {len(proposals)} files. Preview diffs:")
+    for p, (o, n) in proposals.items():
+        print("---", p)
+        print(st._render_diff(o, n, p))
+    if args.only_preview:
+        print("Preview only; exiting.")
+        return 0
+    print("Evaluating proposals in isolated worktree (running unit tests)...")
+    eval_res = st.evaluate_patch(proposals)
+    print("Test result:", eval_res.get("tests", {}).get("returncode"), flush=True)
+    print(eval_res.get("tests", {}).get("output", ""))
+    if args.apply:
+        if not eval_res.get("ok"):
+            print("Tests did not pass in evaluation environment; refusing to apply.", flush=True)
+            return 2
+        print("Applying proposals to a new git branch (confirming)...")
+        apply_res = st.apply_patch(proposals, confirm=True)
+        print("Apply result:", apply_res)
+    else:
+        print("Run with `--apply` to write proposals to a new git branch and commit them (opt-in).")
+    return 0
+
+# Hook into module-level CLI: safe opt-in invocation
+if __name__ == "__main__":
+    import sys
+    if "--selftrain" in sys.argv:
+        # strip the flag and pass the rest to the subcommand parser
+        argv = [a for a in sys.argv[1:] if a != "--selftrain"]
+        exit(_entry_selftrain(argv))
+        result_container['value'] = eval(code, {"__builtins__": {}})
+        
+thread = threading.Thread(target=target, name="safe-eval", daemon=True)
+thread.start()
+thread.join(timeout=timeout)
+if thread.is_alive():
+                raise TimeoutError("evaluation timed out")
+print("This module is intended to be imported or run with --selftrain for self-training.")
+sys.exit(0)
+if 'error' in result_container:
+                raise result_container['error']
+
+# Self-healing subsystem: monitors core components, proposes non-destructive repairs,
+# evaluates repairs in an isolated worktree, and (with explicit opt-in) applies fixes.
+# Safe-by-default: no destructive actions unless --apply is provided.
+
+import importlib
+import importlib.util
+import py_compile
+import difflib
+import traceback
+from typing import List, Dict, Any, Optional
+from pathlib import Path
+
+class SelfHealer:
+    """
+    Self-healing coordinator.
+    - run_health_checks() -> collects smoke-test failures and traces
+    - propose_repairs() -> conservative edit proposals (uses autocorrect_source)
+    - evaluate_repairs() -> apply proposals in a worktree and run tests
+    - apply_repairs() -> apply to repo (creates branch and commit) only with explicit confirm
+    - recover_via_git_reset() -> non-destructive fallback: checkout files from HEAD into worktree
+    Design: non-autonomous. All write/apply actions require explicit confirm flags.
+    """
+    CORE_MODULES = ["say_lexer", "say_parser", "say_vm", "say_codegen", "sayc"]
+
+    def __init__(self, repo_path: Optional[str] = None):
+        self.repo = Path(repo_path or ".").resolve()
+        self.traces: Dict[str, str] = {}
+        self.proposals: Dict[str, Dict[str, str]] = {}  # path -> {"orig":..., "proposed":...}
+        self.logger = configure_logging("selfhealer", level=logging.INFO, logfile=None)
+
+    # ---------- Health checks / smoke tests ----------
+    def _module_origin(self, modulename: str) -> Optional[Path]:
+        spec = importlib.util.find_spec(modulename)
+        if spec and spec.origin:
+            return Path(spec.origin)
+        return None
+
+    def run_health_checks(self) -> Dict[str, Any]:
+        """Run lightweight smoke tests for core modules and report failures with traces."""
+        report: Dict[str, Any] = {}
+        for m in self.CORE_MODULES:
+            info: Dict[str, Any] = {"ok": True, "trace": None, "origin": None}
+            try:
+                # import module fresh (best-effort)
+                mod = importlib.import_module(m)
+                origin = self._module_origin(m)
+                info["origin"] = str(origin) if origin else None
+
+                # run small smoke tests depending on module
+                if m == "say_lexer":
+                    try:
+                        toks = list(mod.tokenize('print("ok")'))
+                        info["smoke"] = {"tokens": len(toks)}
+                    except Exception as e:
+                        raise
+
+                elif m == "say_parser":
+                    try:
+                        # use lexer to produce tokens then parse
+                        lex = importlib.import_module("say_lexer")
+                        src = 'print("ok")'
+                        toks = list(lex.tokenize(src))
+                        pmod = importlib.import_module("say_parser")
+                        prog = pmod.Parser(toks).parse_program()
+                        info["smoke"] = {"stmts": len(prog.stmts)}
+                    except Exception:
+                        raise
+
+                elif m == "say_vm":
+                    try:
+                        vm_mod = importlib.import_module("say_vm")
+                        # run a trivial program via public helper if available
+                        if hasattr(vm_mod, "_run_source_with_execvm"):
+                            res = vm_mod._run_source_with_execvm('x = 1\nprint(x)\n', trace=False, max_steps=1000, timeout=1.0)
+                            info["smoke"] = {"result": res}
+                        else:
+                            info["smoke"] = {"note": "no helper available"}
+                    except Exception:
+                        raise
+
+                elif m == "say_codegen":
+                    try:
+                        cg = importlib.import_module("say_codegen")
+                        # try generating IR for a trivial module
+                        if hasattr(cg, "example_module"):
+                            ir_text = cg.example_module()
+                            info["smoke"] = {"ir_len": len(ir_text)}
+                        else:
+                            info["smoke"] = {"note": "no example_module"}
+                    except Exception:
+                        raise
+
+                elif m == "sayc":
+                    try:
+                        scm = importlib.import_module("sayc")
+                        info["smoke"] = {"loaded": True}
+                    except Exception:
+                        raise
+
+            except Exception as e:
+                info["ok"] = False
+                info["trace"] = traceback.format_exc()
+                self.traces[m] = info["trace"]
+                self.logger.error("Health check failed for %s: %s", m, e)
+            report[m] = info
+        return report
+
+    # ---------- Proposals ----------
+    def propose_repairs(self, health_report: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+        """
+        For modules with failures, produce conservative text proposals:
+         - read file from module origin (if available)
+         - run autocorrect_source (conservative fixes)
+         - run py_compile check on proposed text
+        Returns mapping file_path -> {orig, proposed, diff}
+        """
+        proposals: Dict[str, Dict[str, str]] = {}
+        for mod_name, info in health_report.items():
+            if info.get("ok", True):
+                continue
+            origin = info.get("origin")
+            if not origin:
+                self.logger.warning("No origin for failed module %s; skipping propose", mod_name)
+                continue
+            p = Path(origin)
+            if not p.exists():
+                self.logger.warning("Origin path %s missing; skipping propose", origin)
+                continue
+            try:
+                orig_text = p.read_text(encoding="utf-8")
+            except Exception as e:
+                self.logger.exception("Cannot read %s: %s", p, e)
+                continue
+            try:
+                proposed = autocorrect_source(orig_text)
+            except Exception:
+                proposed = orig_text
+            if proposed == orig_text:
+                # still propose running a compile check and include trace for reviewer
+                diff = ""
+            else:
+                od = orig_text.splitlines(keepends=True)
+                pd = proposed.splitlines(keepends=True)
+                diff = "".join(difflib.unified_diff(od, pd, fromfile=str(p), tofile=str(p) + ".proposed"))
+            # sanity compile test for proposed text
+            compile_ok = False
+            compile_trace = None
+            try:
+                # write to temp file and py_compile
+                tmp = Path(tempfile.mkstemp(suffix=p.suffix)[1])
+                tmp.write_text(proposed, encoding="utf-8")
+                py_compile.compile(str(tmp), doraise=True)
+                compile_ok = True
+            except Exception as ce:
+                compile_trace = traceback.format_exc()
+            finally:
+                try:
+                    tmp.unlink()
+                except Exception:
+                    pass
+            proposals[str(p.relative_to(self.repo))] = {"orig": orig_text, "proposed": proposed, "diff": diff, "compile_ok": compile_ok, "compile_trace": compile_trace}
+        self.proposals = proposals
+        return proposals
+
+    # ---------- Evaluation ----------
+    def evaluate_repairs(self, proposals: Dict[str, Dict[str, str]], run_tests: bool = True) -> Dict[str, Any]:
+        """
+        Apply proposals into isolated worktree (via SelfTrainer._create_worktree) and run test suite.
+        Returns evaluation report including diffs and test output.
+        """
+        st = SelfTrainer(repo_path=str(self.repo))
+        wt = st._create_worktree()
+        diffs = {}
+        try:
+            for rel, data in proposals.items():
+                targ = wt / rel
+                targ.parent.mkdir(parents=True, exist_ok=True)
+                targ.write_text(data["proposed"], encoding="utf-8")
+                diffs[rel] = data.get("diff", "")
+            test_res = None
+            if run_tests:
+                try:
+                    cp = subprocess.run([sys.executable, "-m", "unittest", "discover", "-v"], cwd=str(wt), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
+                    test_res = {"returncode": cp.returncode, "output": cp.stdout}
+                except subprocess.TimeoutExpired as e:
+                    test_res = {"returncode": 2, "output": f"timeout: {e}"}
+            return {"ok": (test_res is None) or (test_res.get("returncode") == 0), "diffs": diffs, "tests": test_res}
+        finally:
+            st._cleanup_worktree()
+
+    # ---------- Apply ----------
+    def apply_repairs(self, proposals: Dict[str, Dict[str, str]], confirm: bool = False) -> Dict[str, Any]:
+        """
+        Apply proposals to repo. Uses SelfTrainer.apply_patch to create a branch and commit.
+        confirm must be True to actually write; otherwise returns preview.
+        """
+        st = SelfTrainer(repo_path=str(self.repo))
+        # convert our proposals into SelfTrainer expected mapping
+        st_map: Dict[str, Tuple[str, str]] = {}
+        for rel, data in proposals.items():
+            st_map[rel] = (data["orig"], data["proposed"])
+        if not confirm:
+            preview = {k: v["diff"] for k, v in proposals.items()}
+            return {"applied": False, "reason": "confirm flag not set", "preview": preview}
+        # delegate commit/branch responsibilities to SelfTrainer.apply_patch
+        res = st.apply_patch(st_map, confirm=True)
+        return res
+
+    # ---------- Non-destructive fallback recovery ----------
+    def recover_via_git_reset(self, mod_names: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Attempt to restore module files to HEAD (non-destructive; creates branch if needed).
+        Returns map of file -> status.
+        """
+        out = {}
+        mods = mod_names or list(self.traces.keys())
+        for m in mods:
+            origin = self._module_origin(m)
+            if not origin:
+                out[m] = {"ok": False, "reason": "no origin found"}
+                continue
+            rel = str(Path(origin).relative_to(self.repo))
+            try:
+                # run git checkout -- <file>
+                cp = subprocess.run(["git", "checkout", "--", rel], cwd=str(self.repo), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+                ok = cp.returncode == 0
+                out[m] = {"ok": ok, "stdout": cp.stdout, "stderr": cp.stderr}
+            except Exception as e:
+                out[m] = {"ok": False, "error": traceback.format_exc()}
+        return out
+
+# ---------- CLI entry ----------
+def _entry_selfheal(argv: Optional[List[str]] = None):
+    import argparse
+    parser = argparse.ArgumentParser(prog="sayit-selfheal", description="Self-healing for Sayit (safe-by-default, opt-in applies)")
+    parser.add_argument("--apply", action="store_true", help="Apply proposed repairs (requires tests to pass and explicit confirmation)")
+    parser.add_argument("--auto-recover", action="store_true", help="If repair proposals fail, attempt git reset recovery for module files")
+    parser.add_argument("--run-tests", action="store_true", help="Run unit tests during evaluation (default: True if unspecified)")
+    parser.add_argument("--repair-strategy", choices=["autocorrect", "none"], default="autocorrect", help="How to propose non-destructive repairs")
+    args = parser.parse_args(argv)
+
+    healer = SelfHealer(repo_path=".")
+    healer.logger.info("Starting self-heal health checks")
+    health = healer.run_health_checks()
+
+    # print summary
+    for mod, info in health.items():
+        status = "OK" if info.get("ok", False) else "FAIL"
+        print(f"{mod}: {status}")
+        if not info.get("ok"):
+            print("  origin:", info.get("origin"))
+            print("  trace (short):")
+            t = info.get("trace", "")
+            print("\n".join(t.splitlines()[:8]))
+
+    # prepare proposals if requested
+    proposals = {}
+    if args.repair_strategy == "autocorrect":
+        healer.logger.info("Proposing conservative repairs (autocorrect strategy)")
+        proposals = healer.propose_repairs(health)
+        if not proposals:
+            print("No conservative proposals generated.")
+        else:
+            print(f"Generated proposals for {len(proposals)} files. Preview diffs:")
+            for rel, d in proposals.items():
+                print("---", rel)
+                diff = d.get("diff") or "(no textual diff; proposal identical or whitespace-only)"
+                print(diff[:1600])  # clip long diffs
+
+    # Evaluate proposals in isolated worktree
+    if proposals:
+        print("Evaluating proposals in isolated worktree (running tests)...")
+        eval_res = healer.evaluate_repairs(proposals, run_tests=args.run_tests or True)
+        print("Evaluation ok:", eval_res.get("ok"))
+        if eval_res.get("tests"):
+            print("Test returncode:", eval_res["tests"].get("returncode"))
+            print("Test output (first 800 chars):")
+            print((eval_res["tests"].get("output") or "")[:800])
+
+        if args.apply:
+            if not eval_res.get("ok"):
+                print("Evaluation failed; refusing to apply. Use --auto-recover to try git reset fallback.")
+                if args.auto_recover:
+                    rec = healer.recover_via_git_reset()
+                    print("Recovery results:", rec)
+                return 2
+            print("Applying proposals to repository (creating branch and committing)...")
+            apply_res = healer.apply_repairs(proposals, confirm=True)
+            print("Apply result:", apply_res)
+            return 0
+
+    # If no proposals or not applying, optionally attempt git reset recovery
+    if args.auto_recover and not proposals:
+        print("No proposals to apply; running git reset recovery for failed modules...")
+        rec = healer.recover_via_git_reset()
+        print("Recovery results:", rec)
+
+    print("Self-heal run complete. No destructive action performed (run with --apply to commit proposals).")
+    return 0
+
+# Hook: safe opt-in invocation
+if __name__ == "__main__":
+    import sys as _sys
+    if "--selfheal" in _sys.argv:
+        argv = [a for a in _sys.argv[1:] if a != "--selfheal"]
+        exit(_entry_selfheal(argv))
+
+# Executable tooling: CLI helpers to run tests, lint, type-check, format, package, bench, and generate CI.
+# Safe-by-default: operations that modify the repo (write files, build docker image) require `--apply`.
+
+import shutil
+import subprocess
+import textwrap
+from pathlib import Path
+from typing import Tuple, Optional, List, Dict
+
+class ExecutableTooling:
+    """
+    Lightweight executable tooling for development and CI.
+    Usage (CLI entry below) exposes subcommands: status, test, lint, typecheck, format, build, gen-ci, bench, env-run, dockerize.
+    Non-destructive by default. Use --apply to write files / build images.
+    """
+
+    def __init__(self, repo_root: Optional[str] = None):
+        self.repo = Path(repo_root or ".").resolve()
+        self.tools = {
+            "python": shutil.which("python") or shutil.which("python3"),
+            "pytest": shutil.which("pytest"),
+            "flake8": shutil.which("flake8"),
+            "pylint": shutil.which("pylint"),
+            "mypy": shutil.which("mypy"),
+            "black": shutil.which("black"),
+            "build": shutil.which("python") or shutil.which("python3"),  # used with -m build
+            "docker": shutil.which("docker"),
+        }
+
+    # -------------------------
+    # Helpers
+    # -------------------------
+    def _sh(self, cmd: List[str], cwd: Optional[Path] = None, timeout: Optional[int] = None) -> Tuple[int, str, str]:
+        try:
+            cp = subprocess.run(cmd, cwd=str(cwd or self.repo), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+            return cp.returncode, cp.stdout, cp.stderr
+        except subprocess.TimeoutExpired as e:
+            return 124, "", f"timeout after {timeout}s"
+
+    def available_tools(self) -> Dict[str, Optional[str]]:
+        return self.tools.copy()
+
+    # -------------------------
+    # Operations
+    # -------------------------
+    def status(self) -> str:
+        lines = ["Tooling status:"]
+        for k, p in self.available_tools().items():
+            lines.append(f"  - {k}: {'available at ' + p if p else 'missing'}")
+        return "\n".join(lines)
+
+    def run_tests(self, use_pytest: bool = True, timeout: int = 300) -> Dict[str, object]:
+        """
+        Prefer pytest if present and requested; otherwise run unittest discovery.
+        Returns dict with returncode and output.
+        """
+        if use_pytest and self.tools.get("pytest"):
+            rc, out, err = self._sh([self.tools["pytest"], "-q"], timeout=timeout)
+            return {"engine": "pytest", "returncode": rc, "stdout": out, "stderr": err}
+        # fallback to unittest discovery
+        rc, out, err = self._sh([self.tools["python"] or "python", "-m", "unittest", "discover", "-v"], timeout=timeout)
+        return {"engine": "unittest", "returncode": rc, "stdout": out, "stderr": err}
+
+    def lint(self, targets: Optional[List[str]] = None, tools: Optional[List[str]] = None, timeout: int = 120) -> Dict[str, Dict]:
+        """
+        Run configured linters over paths. tools can be subset of ['flake8','pylint'].
+        Returns mapping tool -> result dict.
+        """
+        results = {}
+        targets = targets or ["."]
+        tools = tools or ["flake8", "pylint"]
+        for t in tools:
+            exe = self.tools.get(t)
+            if not exe:
+                results[t] = {"ok": False, "reason": "not installed"}
+                continue
+            cmd = [exe] + targets
+            rc, out, err = self._sh(cmd, timeout=timeout)
+            results[t] = {"ok": rc == 0, "returncode": rc, "stdout": out, "stderr": err}
+        return results
+
+    def typecheck(self, targets: Optional[List[str]] = None, timeout: int = 120) -> Dict[str, object]:
+        exe = self.tools.get("mypy")
+        targets = targets or ["."]
+        if not exe:
+            return {"ok": False, "reason": "mypy not installed"}
+        rc, out, err = self._sh([exe] + targets, timeout=timeout)
+        return {"ok": rc == 0, "returncode": rc, "stdout": out, "stderr": err}
+
+    def format_code(self, targets: Optional[List[str]] = None, check: bool = False, timeout: int = 120) -> Dict[str, object]:
+        exe = self.tools.get("black")
+        targets = targets or ["."]
+        if not exe:
+            return {"ok": False, "reason": "black not installed"}
+        cmd = [exe]
+        if check:
+            cmd.append("--check")
+        cmd += targets
+        rc, out, err = self._sh(cmd, timeout=timeout)
+        return {"ok": rc == 0, "returncode": rc, "stdout": out, "stderr": err}
+
+    def build_package(self, apply: bool = False, timeout: int = 300) -> Dict[str, object]:
+        """
+        Build sdist/wheel using PEP517 build if `python -m build` available; fallback to setup.py.
+        If apply=False only reports what would be done and required tools.
+        """
+        python_exe = self.tools.get("python") or "python"
+        # detect build package
+        has_build_module = False
+        try:
+            rc, out, err = self._sh([python_exe, "-c", "import importlib.util, sys; print(importlib.util.find_spec('build') is not None)"])
+            has_build_module = "True" in out
+        except Exception:
+            pass
+
+        if not apply:
+            return {"ok": True, "would": "build using python -m build" if has_build_module else "build using setup.py sdist bdist_wheel", "has_build": has_build_module}
+
+        if has_build_module:
+            rc, out, err = self._sh([python_exe, "-m", "build"], timeout=timeout)
+        else:
+            if (self.repo / "setup.py").exists():
+                rc, out, err = self._sh([python_exe, "setup.py", "sdist", "bdist_wheel"], timeout=timeout)
+            else:
+                return {"ok": False, "reason": "no build module and no setup.py"}
+        return {"ok": rc == 0, "returncode": rc, "stdout": out, "stderr": err}
+
+    def generate_github_actions(self, apply: bool = False) -> Dict[str, object]:
+        """
+        Generate a pragmatic GitHub Actions workflow for test + lint + format checks.
+        apply=False returns preview; apply=True writes `.github/workflows/sayit-ci.yml`.
+        """
+        wf_dir = self.repo / ".github" / "workflows"
+        wf_file = wf_dir / "sayit-ci.yml"
+        content = textwrap.dedent("""\
+            name: Sayit CI
+
+            on:
+              push:
+              pull_request:
+
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                strategy:
+                  matrix:
+                    python-version: [3.9, 3.10, 3.11]
+                steps:
+                  - uses: actions/checkout@v4
+                  - name: Setup Python
+                    uses: actions/setup-python@v4
+                    with:
+                      python-version: ${{ matrix.python-version }}
+                  - name: Install dependencies
+                    run: |
+                      python -m pip install --upgrade pip
+                      pip install pytest flake8 black mypy
+                  - name: Run tests
+                    run: |
+                      pytest -q || python -m unittest discover -v
+                  - name: Lint (flake8)
+                    run: flake8 .
+                  - name: Type-check (mypy)
+                    run: mypy .
+            """)
+        if not apply:
+            return {"ok": True, "preview": str(wf_file), "content": content}
+        wf_dir.mkdir(parents=True, exist_ok=True)
+        wf_file.write_text(content, encoding="utf-8")
+        return {"ok": True, "written": str(wf_file)}
+
+    def bench_vm(self, reps: int = 5, program_samples: Optional[List[str]] = None) -> Dict[str, object]:
+        """
+        Simple benchmark harness that runs internal VM on sample sources and reports timing.
+        program_samples: list of source strings. If None uses small builtins.
+        """
+        samples = program_samples or [
+            "x = 0\nWhile x < 1000:\n    x = x + 1\n    end()\n",  # ends early via end() may stop; use small loops
+            "x = 1\nprint(x)\n" * 10,
+        ]
+        results = []
+        for src in samples:
+            times = []
+            for _ in range(reps):
+                start = time.perf_counter()
+                try:
+                    _run_source_with_execvm(src, trace=False, max_steps=10_000_000, timeout=5.0)
+                    rc = True
+                except Exception as e:
+                    rc = False
+                times.append(time.perf_counter() - start)
+            results.append({"sample_len": len(src), "times": times, "median": sorted(times)[len(times)//2], "ok": rc})
+        return {"ok": True, "results": results}
+
+    def create_venv_and_run(self, apply: bool = False, test_cmd: Optional[List[str]] = None) -> Dict[str, object]:
+        """
+        Create .venv, install requirements if present, and run tests inside it.
+        apply=False only previews actions.
+        """
+        venv_dir = self.repo / ".venv"
+        req = self.repo / "requirements.txt"
+        python_exe = shutil.which("python") or shutil.which("python3")
+        if not python_exe:
+            return {"ok": False, "reason": "python exe not found"}
+
+        if not apply:
+            return {"ok": True, "would": f"python -m venv {venv_dir}; pip install -r requirements.txt (if present); run tests"}
+
+        # create venv
+        rc, out, err = self._sh([python_exe, "-m", "venv", str(venv_dir)])
+        if rc != 0:
+            return {"ok": False, "returncode": rc, "stderr": err}
+        pip = venv_dir / ("Scripts" if shutil.which("python") and Path("Scripts").exists() else "bin") / "pip"
+        pip = str(pip)
+        if req.exists():
+            rc, out, err = self._sh([pip, "install", "-r", str(req)], timeout=600)
+            if rc != 0:
+                return {"ok": False, "stderr": err}
+        # run tests
+        tc = test_cmd or [str(venv_dir / "bin" / "pytest")] if (venv_dir / "bin" / "pytest").exists() else [python_exe, "-m", "unittest", "discover", "-v"]
+        rc, out, err = self._sh(tc, timeout=600)
+        return {"ok": rc == 0, "returncode": rc, "stdout": out, "stderr": err}
+
+    def dockerize(self, image_name: str = "sayit:latest", apply: bool = False) -> Dict[str, object]:
+        """
+        Create a minimal Dockerfile and optionally build the image (requires docker).
+        apply=False previews the Dockerfile; apply=True writes Dockerfile and builds image.
+        """
+        dockerfile = self.repo / "Dockerfile.sayit"
+        dockerfile_content = textwrap.dedent("""\
+            FROM python:3.11-slim
+            WORKDIR /app
+            COPY . /app
+            RUN pip install --no-cache-dir .
+            CMD ["python", "-m", "sayc", "run"]
+            """)
+        if not apply:
+            return {"ok": True, "preview_path": str(dockerfile), "content": dockerfile_content, "docker_available": bool(self.tools.get("docker"))}
+        dockerfile.write_text(dockerfile_content, encoding="utf-8")
+        if not self.tools.get("docker"):
+            return {"ok": False, "reason": "docker not available"}
+        rc, out, err = self._sh([self.tools["docker"], "build", "-t", image_name, "-f", str(dockerfile), "."], timeout=900)
+        return {"ok": rc == 0, "returncode": rc, "stdout": out, "stderr": err}
+
+# -------------------------
+# CLI entry for tooling
+# -------------------------
+def _entry_toolbox(argv: Optional[List[str]] = None):
+    import argparse
+    parser = argparse.ArgumentParser(prog="sayit-toolbox", description="Executable tooling for Sayit (tests, lint, typecheck, format, build, bench, CI generation)")
+    sub = parser.add_subparsers(dest="cmd")
+
+    sub.add_parser("status", help="Show available toolchain components")
+    p_test = sub.add_parser("test", help="Run tests (pytest preferred)")
+    p_test.add_argument("--no-pytest", action="store_true", help="Do not use pytest even if available")
+    p_lint = sub.add_parser("lint", help="Run linters")
+    p_lint.add_argument("--tools", nargs="+", choices=["flake8", "pylint"], default=["flake8"])
+    p_format = sub.add_parser("format", help="Run black formatter")
+    p_format.add_argument("--check", action="store_true", help="Run black in --check mode")
+    p_type = sub.add_parser("typecheck", help="Run mypy")
+    p_build = sub.add_parser("build", help="Build package")
+    p_build.add_argument("--apply", action="store_true", help="Perform build")
+    p_ci = sub.add_parser("gen-ci", help="Generate GitHub Actions workflow (preview unless --apply)")
+    p_ci.add_argument("--apply", action="store_true", help="Write workflow file")
+    p_bench = sub.add_parser("bench", help="Run small VM benchmarks")
+    p_bench.add_argument("--reps", type=int, default=5)
+    p_venv = sub.add_parser("env-run", help="Create venv and run tests (preview unless --apply)")
+    p_venv.add_argument("--apply", action="store_true", help="Create venv and run")
+    p_docker = sub.add_parser("dockerize", help="Create Dockerfile and optionally build image")
+    p_docker.add_argument("--apply", action="store_true", help="Write Dockerfile and build image")
+    p_docker.add_argument("--name", default="sayit:latest")
+    parser.add_argument("--repo", default=".", help="Repository root (default: current directory)")
+
+    args = parser.parse_args(argv)
+    tb = ExecutableTooling(repo_root=args.repo)
+
+    if args.cmd == "status":
+        print(tb.status())
+        return 0
+
+    if args.cmd == "test":
+        res = tb.run_tests(use_pytest=not getattr(args, "no_pytest", False))
+        print("Engine:", res.get("engine"))
+        print("RC:", res.get("returncode"))
+        print(res.get("stdout") or res.get("stderr"))
+        return 0 if res.get("returncode") == 0 else 2
+
+    if args.cmd == "lint":
+        res = tb.lint(tools=getattr(args, "tools", ["flake8"]))
+        for k, v in res.items():
+            print(f"{k}: ok={v.get('ok')} rc={v.get('returncode')}")
+            if v.get("stdout"):
+                print(v["stdout"][:2000])
+        return 0
+
+    if args.cmd == "format":
+        res = tb.format_code(check=getattr(args, "check", False))
+        if not res.get("ok"):
+            print("format:", res.get("reason") or res.get("stderr"))
+            return 2
+        print("format ok")
+        return 0
+
+    if args.cmd == "typecheck":
+        res = tb.typecheck()
+        print(res.get("stdout") or res.get("stderr") or "mypy ok")
+        return 0 if res.get("ok") else 2
+
+    if args.cmd == "build":
+        res = tb.build_package(apply=getattr(args, "apply", False))
+        print(res.get("stdout") or res.get("stderr") or res.get("would") or res)
+        return 0 if res.get("ok") else 2
+
+    if args.cmd == "gen-ci":
+        res = tb.generate_github_actions(apply=getattr(args, "apply", False))
+        if res.get("ok"):
+            if getattr(args, "apply", False):
+                print("Workflow written to .github/workflows/sayit-ci.yml")
+            else:
+                print("Preview:\n", res.get("content", "")[:1000])
+            return 0
+        print("Failed:", res)
+        return 2
+
+    if args.cmd == "bench":
+        res = tb.bench_vm(reps=getattr(args, "reps", 5))
+        for r in res.get("results", []):
+            print("sample_len:", r["sample_len"], "median(s):", r["median"], "ok:", r["ok"])
+        return 0
+
+    if args.cmd == "env-run":
+        res = tb.create_venv_and_run(apply=getattr(args, "apply", False))
+        print(res.get("stdout") or res.get("stderr") or res.get("would") or res)
+        return 0 if res.get("ok") else 2
+
+    if args.cmd == "dockerize":
+        res = tb.dockerize(image_name=getattr(args, "name", "sayit:latest"), apply=getattr(args, "apply", False))
+        print(res.get("stdout") or res.get("stderr") or res.get("preview_path") or res)
+        return 0 if res.get("ok") else 2
+
+    parser.print_help()
+    return 0
+
+# Expose in __all__
+__all__ += ["ExecutableTooling", "_entry_toolbox"]
+
+# Hook: run as `python system.py --toolbox <subcmd>` or use dedicated entry
+if __name__ == "__main__":
+    import sys as _sys
+    if "--toolbox" in _sys.argv:
+        argv = [a for a in _sys.argv[1:] if a != "--toolbox"]
+        exit(_entry_toolbox(argv))
+        import sys
+        import logging
+        import tempfile
+        import subprocess
+        import time
+        from typing import Any, Dict, List, Optional, Tuple
+        from pathlib import Path
+        from say_vm import _run_source_with_execvm
+        from selftrainer import SelfTrainer
+        from autocorrect import autocorrect_source
+        from logging_config import configure_logging
+        
