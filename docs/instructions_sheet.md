@@ -278,4 +278,3 @@ sayc hello.say
 
 ---
 
-👉 Would you like me to prepare a **ready-to-publish PDF guide** (with title page, chapters, examples, diagrams) for distribution alongside the GitHub release?
