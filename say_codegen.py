@@ -72,3 +72,34 @@ class Codegen:
         if self.builder is not None and not self.builder.block.is_terminated:
             self.builder.ret(ir.IntType(32)(0))
         return str(self.module)
+
+# ---------------------------
+# Demo / helper for quick IR generation
+# ---------------------------
+def example_module(out_file: str = None) -> str:
+    """
+    Build a tiny example module and return the LLVM IR as a string.
+    If out_file is provided, the IR is also written to that file.
+    """
+    cg = Codegen()
+    cg.emit_main()
+    cg.emit_print("Hello, Sayit!")
+    cg.emit_print("This is an example LLVM IR from Codegen.")
+    llvm_ir = cg.finish()
+
+    if out_file:
+        with open(out_file, "w", encoding="utf-8") as f:
+            f.write(llvm_ir)
+    return llvm_ir
+
+
+if __name__ == "__main__":
+    # Lightweight CLI: optional `-o <file>` to write IR to disk, otherwise print to stdout.
+    import sys
+    out_file = None
+    if len(sys.argv) >= 3 and sys.argv[1] in ("-o", "--out"):
+        out_file = sys.argv[2]
+
+    ir_text = example_module(out_file=out_file)
+    if out_file is None:
+        print(ir_text)
