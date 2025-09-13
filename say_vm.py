@@ -159,3 +159,4 @@ if __name__ == "__main__":
         print("VM variables:")
         for k, v in sorted(vm_instance.vars.items()):
             print(f"  {k} = {v}")
+            args.out = sys.argv[2]
