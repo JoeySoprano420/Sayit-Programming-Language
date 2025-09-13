@@ -1,0 +1,12 @@
+# Core dependencies for Sayit Language Compiler & VM
+
+# LLVM bindings for Python (used for IR generation + JIT/AOT compilation)
+llvmlite>=0.43.0
+
+# Packaging utilities
+setuptools>=70.0.0
+wheel>=0.43.0
+
+# Optional but useful for CLI enhancements (colored errors, debugging, logging)
+rich>=13.7.1
+click>=8.1.7
