@@ -93,5 +93,6 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
-
-
+out_file = sys.argv[2]
+main(out_file=out_file)
+main()
