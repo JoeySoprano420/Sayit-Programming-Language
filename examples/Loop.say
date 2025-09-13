@@ -1,0 +1,12 @@
+While z < 10:
+    y = y + x until y == 9
+
+    If z > 7 and z < 9:
+        print("true")
+    Else:
+        print("maybe")
+
+    Elif z in [3...8]:
+        print("true")
+    Else:
+        print("false")
