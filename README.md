@@ -1,1 +1,1 @@
-# Sayiy-Programming-Language
+# Sayit-Programming-Language
