@@ -1,0 +1,14 @@
+// Hello World Example
+// This is a simple hello world program in Sayiy
+
+print("Hello, World!")
+print("Welcome to Sayiy Programming Language!")
+
+// Variables
+let name = "Sayiy"
+let version = 1.0
+let is_awesome = true
+
+print("Language:", name)
+print("Version:", version)
+print("Is awesome:", is_awesome)

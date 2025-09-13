@@ -1,0 +1,85 @@
+// Mathematical Examples
+// Demonstrating mathematical operations and functions
+
+// Basic arithmetic
+let a = 10
+let b = 3
+
+print("Basic Arithmetic:")
+print(a, "+", b, "=", a + b)
+print(a, "-", b, "=", a - b)
+print(a, "*", b, "=", a * b)
+print(a, "/", b, "=", a / b)
+print(a, "%", b, "=", a % b)
+print(a, "^", b, "=", a ^ b)
+
+// Math functions
+print("\nMath Functions:")
+print("abs(-42):", abs(-42))
+print("sqrt(16):", sqrt(16))
+print("pow(2, 8):", pow(2, 8))
+print("floor(3.7):", floor(3.7))
+print("ceil(3.2):", ceil(3.2))
+print("round(3.14159, 2):", round(3.14159, 2))
+
+// Working with arrays of numbers
+let nums = [1, 5, 3, 9, 2, 8, 4, 7, 6]
+print("\nArray operations:")
+print("Numbers:", nums)
+print("Sum:", sum(nums))
+print("Min:", min(nums))
+print("Max:", max(nums))
+print("Sorted:", sort([1, 5, 3, 9, 2, 8, 4, 7, 6]))
+
+// Statistical functions
+fn mean(arr) {
+    return sum(arr) / len(arr)
+}
+
+fn median(arr) {
+    let sorted_arr = sort([1, 5, 3, 9, 2, 8, 4, 7, 6])  // Copy and sort
+    let n = len(sorted_arr)
+    if n % 2 == 1 {
+        return sorted_arr[floor(n / 2)]
+    } else {
+        let mid1 = sorted_arr[n / 2 - 1]
+        let mid2 = sorted_arr[n / 2]
+        return (mid1 + mid2) / 2
+    }
+}
+
+print("Mean:", mean(nums))
+print("Median:", median(nums))
+
+// Fibonacci sequence
+fn fibonacci(n) {
+    if n <= 1 {
+        return n
+    }
+    return fibonacci(n - 1) + fibonacci(n - 2)
+}
+
+print("\nFibonacci sequence (first 10 numbers):")
+for i in 0..10 {
+    print("F(" + str(i) + ") =", fibonacci(i))
+}
+
+// Prime number checker
+fn is_prime(n) {
+    if n < 2 {
+        return false
+    }
+    for i in 2..floor(sqrt(n)) + 1 {
+        if n % i == 0 {
+            return false
+        }
+    }
+    return true
+}
+
+print("\nPrime numbers up to 20:")
+for i in 2..21 {
+    if is_prime(i) {
+        print(i)
+    }
+}

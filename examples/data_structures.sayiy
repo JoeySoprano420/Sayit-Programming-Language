@@ -1,0 +1,56 @@
+// Data Structures Examples
+// Working with arrays, objects, and other data types
+
+// Arrays
+let numbers = [1, 2, 3, 4, 5]
+let mixed = [42, "hello", true, null, [1, 2, 3]]
+
+print("Numbers:", numbers)
+print("Mixed array:", mixed)
+print("First number:", numbers[0])
+print("Length of numbers:", len(numbers))
+
+// Array methods
+numbers.push(6, 7, 8)
+print("After push:", numbers)
+
+let last = numbers.pop()
+print("Popped:", last)
+print("After pop:", numbers)
+
+// Objects
+let person = {
+    name: "Alice",
+    age: 30,
+    city: "New York",
+    hobbies: ["reading", "swimming", "coding"]
+}
+
+print("Person:", person)
+print("Name:", person.name)
+print("Age:", person["age"])
+print("First hobby:", person.hobbies[0])
+
+// Modify object
+person.age = 31
+person["occupation"] = "Software Developer"
+print("Updated person:", person)
+
+// Built-in functions for data structures
+let words = ["hello", "world", "sayiy", "language"]
+print("Original words:", words)
+print("Joined:", join(words, " "))
+print("Uppercase words:", map(words, upper))
+print("Long words:", filter(words, (word) => len(word) > 4))
+
+// Object functions
+print("Person keys:", keys(person))
+print("Person values:", values(person))
+
+// String operations
+let text = "Hello, Sayiy Programming Language!"
+print("Original text:", text)
+print("Uppercase:", upper(text))
+print("Words:", split(text, " "))
+print("Contains 'Sayiy':", contains(text, "Sayiy"))
+print("Starts with 'Hello':", starts_with(text, "Hello"))
