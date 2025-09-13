@@ -1,0 +1,56 @@
+// Control Flow Examples
+// Demonstrating if statements, loops, and control structures
+
+// If statements
+let temperature = 25
+
+if temperature > 30 {
+    print("It's hot!")
+} else if temperature > 20 {
+    print("It's warm")
+} else {
+    print("It's cool")
+}
+
+// While loops
+let count = 0
+while count < 5 {
+    print("Count:", count)
+    count = count + 1
+}
+
+// For loops with ranges
+print("Numbers 1 to 5:")
+for i in 1..6 {
+    print(i)
+}
+
+// For loops with arrays
+let fruits = ["apple", "banana", "orange", "grape"]
+print("Fruits:")
+for fruit in fruits {
+    print("- " + fruit)
+}
+
+// Nested loops
+print("Multiplication table:")
+for i in 1..4 {
+    let line = ""
+    for j in 1..4 {
+        line = line + str(i * j) + "\t"
+    }
+    print(line)
+}
+
+// Break and continue (would work in actual loops)
+let numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+print("Even numbers:")
+for num in numbers {
+    if num % 2 == 1 {
+        continue
+    }
+    if num > 6 {
+        break
+    }
+    print(num)
+}
