@@ -1,0 +1,266 @@
+Start Ritual:
+    string banner = "=== Sayit Multi-User Chat + File Share System ==="
+    print(banner)
+    print("Features: multi-room chat, file sharing, DMs, roles, moderation, search, reactions, threads, edit/delete, logs, exports")
+    print("Type 'help' for full command list.")
+    end()
+
+Make:
+    username = ""
+    role = "user"
+    current_room = ""
+    user_status = "Available"
+    known_updates = {}
+    known_dms = {}
+
+# === Utility Functions ===
+Func parse_role(rolelist, uname):
+    For line in rolelist:
+        If startswith(line, uname + ":"):
+            return split(line, ":")[1]
+    return "user"
+
+Func line_count(text):
+    return length(split(text, "\n"))
+
+Func remove_line(text, uname):
+    new_lines = ""
+    For line in split(text, "\n"):
+        If not startswith(line, uname):
+            new_lines = new_lines + line + "\n"
+    return new_lines
+
+Func grep(lines, keyword):
+    results = ""
+    For line in split(lines, "\n"):
+        If contains(line, keyword):
+            results = results + line + "\n"
+    return results
+
+Func grep_date(lines, keyword, mode, datef):
+    results = ""
+    For line in split(lines, "\n"):
+        If contains(line, keyword):
+            ts = extract_timestamp(line)
+            If (mode == "after" and ts >= datef) or (mode == "before" and ts <= datef):
+                results = results + line + "\n"
+    return results
+
+Func grep_role(lines, keyword, rfilter):
+    results = ""
+    For line in split(lines, "\n"):
+        If contains(line, keyword) and contains(line, "{" + rfilter + "}"):
+            results = results + line + "\n"
+    return results
+
+Func react_to_line(room, line_no, uname, emoji):
+    _arg_path = room + "_messages.txt"
+    import_file()
+    lines = split(_out_imported_source, "\n")
+    If line_no < length(lines):
+        lines[line_no] = lines[line_no] + " (reacted by " + uname + " with " + emoji + ")"
+        _arg_data = join(lines, "\n")
+        export_file()
+        print("✅ Reaction added.")
+
+Func thread_reply(room, line_no, uname):
+    _arg_prompt = "Thread reply: "
+    input_line()
+    reply = _out_input
+    get_time()
+    ts = _out_time
+    _arg_path = room + "_threads.txt"
+    _arg_data = "[Reply to line " + line_no + " | " + uname + " | " + ts + "] " + reply + "\n"
+    append_file()
+    print("✅ Thread reply added.")
+
+Func edit_line(room, line_no, uname, role, new_text):
+    _arg_path = room + "_messages.txt"
+    import_file()
+    lines = split(_out_imported_source, "\n")
+    If line_no < length(lines):
+        If startswith(lines[line_no], "[" + uname) or role == "admin":
+            lines[line_no] = lines[line_no] + " (edited: " + new_text + ")"
+            _arg_data = join(lines, "\n")
+            export_file()
+            print("✅ Message edited.")
+        Else:
+            print("⛔ Cannot edit others’ messages.")
+
+Func delete_line(room, line_no, uname, role):
+    _arg_path = room + "_messages.txt"
+    import_file()
+    lines = split(_out_imported_source, "\n")
+    If line_no < length(lines):
+        If startswith(lines[line_no], "[" + uname) or role == "admin":
+            lines[line_no] = "[deleted]"
+            _arg_data = join(lines, "\n")
+            export_file()
+            print("✅ Message deleted.")
+        Else:
+            print("⛔ Cannot delete others’ messages.")
+
+Func search_room(room, keyword):
+    _arg_path = room + "_messages.txt"
+    import_file()
+    print("=== Search in " + room + " for '" + keyword + "' ===")
+    print(grep(_out_imported_source, keyword))
+
+Func history_room(room, uname):
+    _arg_path = room + "_messages.txt"
+    import_file()
+    print("=== History of " + uname + " in " + room + " ===")
+    print(grep(_out_imported_source, uname + " |"))
+
+Func global_search(rooms, keyword):
+    print("=== Global search for '" + keyword + "' ===")
+    For room in rooms:
+        _arg_path = room + "_messages.txt"
+        import_file()
+        results = grep(_out_imported_source, keyword)
+        If results != "":
+            print("--- " + room + " ---")
+            print(results)
+
+Func global_history(rooms, uname):
+    print("=== Global history for " + uname + " ===")
+    For room in rooms:
+        _arg_path = room + "_messages.txt"
+        import_file()
+        results = grep(_out_imported_source, uname + " |")
+        If results != "":
+            print("--- " + room + " ---")
+            print(results)
+
+Func global_search_date(rooms, keyword, mode, datef):
+    print("=== Global search for '" + keyword + "' (" + mode + " " + datef + ") ===")
+    For room in rooms:
+        _arg_path = room + "_messages.txt"
+        import_file()
+        results = grep_date(_out_imported_source, keyword, mode, datef)
+        If results != "":
+            print("--- " + room + " ---")
+            print(results)
+
+Func global_search_role(rooms, keyword, rfilter):
+    print("=== Global search for '" + keyword + "' by role '" + rfilter + "' ===")
+    For room in rooms:
+        _arg_path = room + "_messages.txt"
+        import_file()
+        results = grep_role(_out_imported_source, keyword, rfilter)
+        If results != "":
+            print("--- " + room + " ---")
+            print(results)
+
+Func global_search_threads(rooms, keyword):
+    print("=== Global thread search for '" + keyword + "' ===")
+    For room in rooms:
+        _arg_path = room + "_threads.txt"
+        import_file()
+        results = grep(_out_imported_source, keyword)
+        If results != "":
+            print("--- Threads in " + room + " ---")
+            print(results)
+
+Func broadcast_message(rooms, uname, role, text):
+    If role != "admin":
+        print("⛔ Only admins can broadcast.")
+    Else:
+        get_time()
+        ts = _out_time
+        For room in rooms:
+            _arg_path = room + "_messages.txt"
+            _arg_data = "[BROADCAST | " + uname + " | " + ts + "] " + text + "\n"
+            append_file()
+        print("📢 Broadcast sent.")
+
+Func assign_role(cmd, uname, role):
+    If role != "admin":
+        print("⛔ Only admins can assign roles.")
+    Else:
+        parts = split(cmd, " ")
+        target = parts[1]
+        new_role = parts[2]
+        _arg_path = "roles.txt"
+        import_file()
+        lines = _out_imported_source
+        new_lines = remove_line(lines, target)
+        new_lines = new_lines + target + ":" + new_role + "\n"
+        _arg_data = new_lines
+        export_file()
+        print("✅ Role updated.")
+
+Func kick_user(cmd, uname, role):
+    If role != "admin":
+        print("⛔ Only admins can kick.")
+    Else:
+        target = split(cmd, " ")[1]
+        print("User " + target + " kicked (simulated).")
+
+Func ban_user(cmd, uname, role):
+    If role != "admin":
+        print("⛔ Only admins can ban.")
+    Else:
+        target = split(cmd, " ")[1]
+        _arg_path = "banlist.txt"
+        _arg_data = target + "\n"
+        append_file()
+        print("🚫 User " + target + " banned.")
+
+Func unban_user(cmd, uname, role):
+    If role != "admin":
+        print("⛔ Only admins can unban.")
+    Else:
+        target = split(cmd, " ")[1]
+        _arg_path = "banlist.txt"
+        import_file()
+        lines = remove_line(_out_imported_source, target)
+        _arg_data = lines
+        export_file()
+        print("✅ User " + target + " unbanned.")
+
+Func invite_user(cmd, uname, role):
+    If role == "user":
+        print("⛔ Only admins or mods can invite.")
+    Else:
+        target = split(cmd, " ")[1]
+        room = split(cmd, " ")[2]
+        _arg_path = "invites.txt"
+        _arg_data = target + ":" + room + "\n"
+        append_file()
+        print("✉️ Invite sent for " + target + " to join " + room)
+
+Func export_logs(cmd):
+    parts = split(cmd, " ")
+    room = parts[1]
+    _arg_path = room + "_messages.txt"
+    import_file()
+    _arg_name = room + "_export.txt"
+    _arg_data = _out_imported_source
+    export_file()
+    print("✅ Logs exported for " + room)
+
+Func import_logs(cmd):
+    parts = split(cmd, " ")
+    room = parts[1]
+    _arg_name = room + "_import.txt"
+    import_file()
+    _arg_path = room + "_messages.txt"
+    _arg_data = _out_imported_source
+    append_file()
+    print("✅ Logs imported for " + room)
+
+# === MAIN LOOP ===
+rooms_list = ["general", "dev", "music", "adminroom", "announcements", "secrets"]
+
+While true:
+    _arg_prompt = "Command: "
+    input_line()
+    cmd = _out_input
+
+    If cmd == "quit":
+        print("Goodbye " + username + "!")
+        break
+    Elif cmd == "help":
+        print("Commands: join, chat, dm, sendfile, getfile, status, who, broadcast, role, kick, ban, unban, invite, react, thread, edit, delete, search, history, gsearch, ghistory, gsearch-date, gsearch-role, gsearch-threads, export, import, quit")
+    # (all command cases from earlier go here, unchanged, using helpers)
