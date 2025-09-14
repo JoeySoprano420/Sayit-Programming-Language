@@ -1,0 +1,82 @@
+Start Ritual:
+    string banner = "=== Sayit Multi-Room Chat + File Share ==="
+    print(banner)
+    print("Commands: join [room], sendfile, getfile, quit")
+    print("Tip: You must join a room first to chat or share files.")
+    end()
+
+Make:
+    current_room = ""
+
+While true:
+    _arg_prompt = "Command: "
+    input_line()
+    cmd = _out_input
+
+    # Quit program
+    If cmd == "quit":
+        print("Goodbye!")
+        break
+
+    # Join a chatroom
+    Elif cmd startswith "join ":
+        current_room = cmd[5:]
+        print("Joined room: " + current_room)
+        print("Type 'chat' to talk in this room, or 'back' to leave chat mode.")
+
+    # Enter chat mode
+    Elif cmd == "chat":
+        If current_room == "":
+            print("Join a room first with: join [roomname]")
+        Else:
+            print("Entering chat in room: " + current_room)
+            While true:
+                _arg_prompt = "[" + current_room + "] Message: "
+                input_line()
+                msg = _out_input
+
+                If msg == "back":
+                    print("Leaving chat mode.")
+                    break
+
+                # Append message to room log
+                _arg_path = current_room + "_messages.txt"
+                _arg_data = msg + "\n"
+                export_file()
+
+                # Show chat log for this room
+                _arg_path = current_room + "_messages.txt"
+                import_file()
+                print("=== " + current_room + " Chat Log ===")
+                print(_out_imported_source)
+
+    # Upload a file to the current room
+    Elif cmd == "sendfile":
+        If current_room == "":
+            print("Join a room first with: join [roomname]")
+        Else:
+            _arg_prompt = "Enter file path to upload: "
+            input_line()
+            fname = _out_input
+
+            _arg_path = fname
+            upload()
+            print("File uploaded to " + current_room + ": " + _out_uploaded)
+
+    # Download a file from the current room
+    Elif cmd == "getfile":
+        If current_room == "":
+            print("Join a room first with: join [roomname]")
+        Else:
+            _arg_prompt = "Enter filename to download: "
+            input_line()
+            fname = _out_input
+
+            _arg_name = fname
+            _arg_dest = "received_" + fname
+            download()
+            print("File from " + current_room + " saved as: " + _out_downloaded)
+
+    # Unknown command
+    Else:
+        print("Unknown command. Try: join [room], chat, sendfile, getfile, quit")
