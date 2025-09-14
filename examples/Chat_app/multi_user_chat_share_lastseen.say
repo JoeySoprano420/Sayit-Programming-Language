@@ -1,0 +1,197 @@
+Start Ritual:
+    string banner = "=== Sayit Multi-User Chat + File Share (Presence + Last Seen) ==="
+    print(banner)
+    print("Commands: join [room], chat, sendfile, getfile, dm [user], who, quit")
+    print("Tip: 'who' shows online users + last seen times.")
+    end()
+
+Make:
+    current_room = ""
+    username = ""
+    known_updates = {}
+    known_dms = {}
+
+# Ask username
+_arg_prompt = "Enter your username: "
+input_line()
+username = _out_input
+print("Welcome, " + username + "!")
+
+# Add user to presence
+get_time()
+ts = _out_time
+_arg_path = "presence.txt"
+_arg_data = username + " (online since " + ts + ")\n"
+append_file()
+
+While true:
+    # 🔔 Room notifications
+    rooms_list = ["general", "dev", "music"]
+    For room in rooms_list:
+        _arg_path = room + "_messages.txt"
+        import_file()
+        log = _out_imported_source
+        count = line_count(log)
+
+        If known_updates[room] < count:
+            new_count = count - known_updates[room]
+            print("🔔 [" + room + "] " + str(new_count) + " new message(s)/file(s).")
+            known_updates[room] = count
+
+    # 💌 DM notifications
+    _arg_path = "dm_" + username + ".txt"
+    import_file()
+    dm_log = _out_imported_source
+    dm_count = line_count(dm_log)
+
+    If known_dms[username] < dm_count:
+        new_dm_count = dm_count - known_dms[username]
+        print("💌 You have " + str(new_dm_count) + " new direct message(s).")
+        known_dms[username] = dm_count
+
+    # Main command
+    _arg_prompt = "Command: "
+    input_line()
+    cmd = _out_input
+
+    # Quit → mark last seen
+    If cmd == "quit":
+        get_time()
+        ts = _out_time
+
+        _arg_path = "presence.txt"
+        import_file()
+        lines = _out_imported_source
+
+        # Remove old entry
+        new_lines = remove_line(lines, username)
+
+        # Add last seen entry
+        new_lines = new_lines + username + " (last seen at " + ts + ")\n"
+
+        _arg_data = new_lines
+        export_file()
+
+        print("Goodbye " + username + "!")
+        break
+
+    # Show presence
+    Elif cmd == "who":
+        _arg_path = "presence.txt"
+        import_file()
+        print("=== Active Users + Last Seen ===")
+        print(_out_imported_source)
+
+    # Join room
+    Elif cmd startswith "join ":
+        current_room = cmd[5:]
+        print("Joined room: " + current_room)
+
+        _arg_path = current_room + "_messages.txt"
+        import_file()
+        print("=== " + current_room + " Chat History ===")
+        print(_out_imported_source)
+
+        known_updates[current_room] = line_count(_out_imported_source)
+
+    # Room chat
+    Elif cmd == "chat":
+        If current_room == "":
+            print("Join a room first with: join [roomname]")
+        Else:
+            While true:
+                print("..." + username + " is typing in " + current_room + " ...")
+
+                _arg_prompt = "[" + username + "@" + current_room + "] Message: "
+                input_line()
+                msg = _out_input
+
+                If msg == "back":
+                    break
+
+                get_time()
+                ts = _out_time
+
+                _arg_path = current_room + "_messages.txt"
+                _arg_data = "[" + username + " | " + ts + "] " + msg + "\n"
+                append_file()
+
+                _arg_path = current_room + "_messages.txt"
+                import_file()
+                print("=== " + current_room + " Chat Log ===")
+                print(_out_imported_source)
+
+                known_updates[current_room] = line_count(_out_imported_source)
+
+    # Direct messages
+    Elif cmd startswith "dm ":
+        target = cmd[3:]
+        print("Direct messaging " + target + ". Type 'back' to exit DM mode.")
+        While true:
+            print("..." + username + " is typing a DM to " + target + " ...")
+
+            _arg_prompt = "[" + username + " -> " + target + "] DM: "
+            input_line()
+            msg = _out_input
+
+            If msg == "back":
+                break
+
+            get_time()
+            ts = _out_time
+
+            _arg_path = "dm_" + target + ".txt"
+            _arg_data = "[" + username + " | " + ts + "] " + msg + "\n"
+            append_file()
+
+            _arg_path = "dm_" + username + ".txt"
+            _arg_data = "[" + username + " (sent to " + target + ") | " + ts + "] " + msg + "\n"
+            append_file()
+
+            print("💬 DM sent to " + target + ".")
+
+    # File upload
+    Elif cmd == "sendfile":
+        If current_room == "":
+            print("Join a room first with: join [roomname]")
+        Else:
+            _arg_prompt = "Enter file path to upload: "
+            input_line()
+            fname = _out_input
+
+            _arg_path = current_room + "_files/" + fname
+            upload()
+
+            get_time()
+            ts = _out_time
+
+            _arg_path = current_room + "_messages.txt"
+            _arg_data = "[" + username + " | " + ts + "] uploaded file: " + fname + "\n"
+            append_file()
+
+            print("[" + username + " | " + ts + "] uploaded file to " + current_room + ": " + fname)
+
+    # File download
+    Elif cmd == "getfile":
+        If current_room == "":
+            print("Join a room first with: join [roomname]")
+        Else:
+            _arg_prompt = "Enter filename to download: "
+            input_line()
+            fname = _out_input
+
+            _arg_name = current_room + "_files/" + fname
+            _arg_dest = "received_" + fname
+            download()
+
+            get_time()
+            ts = _out_time
+
+            _arg_path = current_room + "_messages.txt"
+            _arg_data = "[" + username + " | " + ts + "] downloaded file: " + fname + "\n"
+            append_file()
+
+            print("[" + username + " | " + ts + "] downloaded file from " + current_room + " as: " + _out_downloaded)
+
+    Else:
+        print("Unknown command. Try: join [room], chat, sendfile, getfile, dm [user], who, quit")
