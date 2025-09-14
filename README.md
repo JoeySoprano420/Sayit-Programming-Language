@@ -222,9 +222,7 @@ Sayit represents a **new category** of programming language:
 
 ---
 
-## 📂 GitHub Workflow Integration
 
-Your CI pipeline (`.github/workflows/python-ci.yml`) ensures Sayit is continuously tested and linted across multiple Python versions, making it production-ready, trustworthy, and portable.
 
 ---
 
