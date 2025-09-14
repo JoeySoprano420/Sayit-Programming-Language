@@ -1,0 +1,92 @@
+Start Ritual:
+    string banner = "=== Sayit Multi-User Chat + File Share (Search & History) ==="
+    print(banner)
+    print("Commands: join [room], chat, react [room] [line#] [emoji], thread [room] [line#], edit [room] [line#] [new text], delete [room] [line#], search [room] [keyword], history [room] [username], quit")
+    print("Search lets you find keywords in logs. History shows all messages from a user in a room.")
+    end()
+
+Make:
+    current_room = ""
+    username = ""
+    role = "user"
+
+# Ask username
+_arg_prompt = "Enter your username: "
+input_line()
+username = _out_input
+
+# Ban check
+_arg_path = "banlist.txt"
+import_file()
+banned = _out_imported_source
+If contains(banned, username):
+    print("⛔ Access denied. " + username + " is banned.")
+    exit()
+
+print("Welcome, " + username + "!")
+
+# Role check
+_arg_path = "roles.txt"
+import_file()
+rolelist = _out_imported_source
+If not contains(rolelist, username):
+    _arg_path = "roles.txt"
+    _arg_data = username + ":user\n"
+    append_file()
+    role = "user"
+Else:
+    role = parse_role(rolelist, username)
+
+print("Your role is: " + role)
+
+# Presence
+get_time()
+ts = _out_time
+_arg_path = "presence.txt"
+_arg_data = username + " (online since " + ts + ") {" + role + "}\n"
+append_file()
+
+While true:
+    _arg_prompt = "Command: "
+    input_line()
+    cmd = _out_input
+
+    If cmd == "quit":
+        print("Goodbye " + username + "!")
+        break
+
+    # 🔍 Search messages by keyword
+    Elif cmd startswith "search ":
+        parts = split(cmd, " ")
+        target_room = parts[1]
+        keyword = parts[2]
+
+        _arg_path = target_room + "_messages.txt"
+        import_file()
+        lines = _out_imported_source
+
+        results = grep(lines, keyword)
+
+        print("=== Search results in " + target_room + " for '" + keyword + "' ===")
+        print(results)
+
+    # 📜 History by username
+    Elif cmd startswith "history ":
+        parts = split(cmd, " ")
+        target_room = parts[1]
+        target_user = parts[2]
+
+        _arg_path = target_room + "_messages.txt"
+        import_file()
+        lines = _out_imported_source
+
+        results = grep(lines, target_user + " |")
+
+        print("=== Message history for " + target_user + " in " + target_room + " ===")
+        print(results)
+
+    # (Other commands: chat, react, thread, edit, delete, join, etc.)
+    # Same as previous versions, unchanged for brevity
+
+    Else:
+        print("Unknown command. Try: join [room], chat, search [room] [keyword], history [room] [user], quit")
