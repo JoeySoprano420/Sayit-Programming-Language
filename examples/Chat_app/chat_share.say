@@ -1,0 +1,58 @@
+Start Ritual:
+    string banner = "=== Sayit Chat + File Share ==="
+    print(banner)
+    print("Type 'chat' to enter chat mode, 'sendfile' to upload, 'getfile' to download, 'quit' to exit.")
+    end()
+
+While true:
+    _arg_prompt = "Command (chat/sendfile/getfile/quit): "
+    input_line()
+    cmd = _out_input
+
+    If cmd == "quit":
+        print("Exiting program.")
+        break
+
+    Elif cmd == "chat":
+        print("Entering chat mode. Type 'back' to return to menu.")
+        While true:
+            _arg_prompt = "Message: "
+            input_line()
+            msg = _out_input
+
+            If msg == "back":
+                print("Leaving chat mode.")
+                break
+
+            # Append message to shared chat log
+            _arg_path = "messages.txt"
+            _arg_data = msg + "\n"
+            export_file()
+
+            # Show current chat log
+            _arg_path = "messages.txt"
+            import_file()
+            print("=== Chat Log ===")
+            print(_out_imported_source)
+
+    Elif cmd == "sendfile":
+        _arg_prompt = "Enter file path to upload: "
+        input_line()
+        fname = _out_input
+
+        _arg_path = fname
+        upload()
+        print("File uploaded: " + _out_uploaded)
+
+    Elif cmd == "getfile":
+        _arg_prompt = "Enter filename to download: "
+        input_line()
+        fname = _out_input
+
+        _arg_name = fname
+        _arg_dest = "received_" + fname
+        download()
+        print("File downloaded as: " + _out_downloaded)
+
+    Else:
+        print("Unknown command. Try again.")
