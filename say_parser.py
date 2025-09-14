@@ -130,6 +130,12 @@ import argparse
 import os
 from say_lexer import tokenize
 
+# Provide a compatibility alias `_tokenize` so other modules that import
+# `from say_parser import _tokenize` continue to work.
+# This keeps tokenization implementation in say_lexer (single source of truth)
+# while exposing the expected symbol from this module.
+_tokenize = tokenize
+
 def parse_code(code: str) -> Program:
     """Parse source text and return a `Program` AST."""
     tokens = list(tokenize(code))
