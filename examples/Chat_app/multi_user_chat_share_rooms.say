@@ -1,0 +1,116 @@
+Start Ritual:
+    string banner = "=== Sayit Multi-User Chat + File Share (Room Directories) ==="
+    print(banner)
+    print("Commands: join [room], chat, sendfile, getfile, quit")
+    print("Tip: You must join a room first to chat or share files.")
+    end()
+
+Make:
+    current_room = ""
+    username = ""
+
+# Ask for username at start
+_arg_prompt = "Enter your username: "
+input_line()
+username = _out_input
+print("Welcome, " + username + "!")
+
+While true:
+    _arg_prompt = "Command: "
+    input_line()
+    cmd = _out_input
+
+    # Quit program
+    If cmd == "quit":
+        print("Goodbye " + username + "!")
+        break
+
+    # Join a chatroom
+    Elif cmd startswith "join ":
+        current_room = cmd[5:]
+        print("Joined room: " + current_room)
+
+        # Show persistent chat log when joining
+        _arg_path = current_room + "_messages.txt"
+        import_file()
+        print("=== " + current_room + " Chat History ===")
+        print(_out_imported_source)
+
+        print("Type 'chat' to talk in this room, or 'back' to leave chat mode.")
+
+    # Enter chat mode
+    Elif cmd == "chat":
+        If current_room == "":
+            print("Join a room first with: join [roomname]")
+        Else:
+            print("Entering chat in room: " + current_room)
+            While true:
+                _arg_prompt = "[" + username + "@" + current_room + "] Message: "
+                input_line()
+                msg = _out_input
+
+                If msg == "back":
+                    print("Leaving chat mode.")
+                    break
+
+                get_time()
+                ts = _out_time   # "HH:MM:SS"
+
+                # Append chat message
+                _arg_path = current_room + "_messages.txt"
+                _arg_data = "[" + username + " | " + ts + "] " + msg + "\n"
+                append_file()
+
+                _arg_path = current_room + "_messages.txt"
+                import_file()
+                print("=== " + current_room + " Chat Log ===")
+                print(_out_imported_source)
+
+    # Upload a file to the current room
+    Elif cmd == "sendfile":
+        If current_room == "":
+            print("Join a room first with: join [roomname]")
+        Else:
+            _arg_prompt = "Enter file path to upload: "
+            input_line()
+            fname = _out_input
+
+            # Place in room-specific directory
+            _arg_path = current_room + "_files/" + fname
+            upload()
+
+            get_time()
+            ts = _out_time
+
+            # Log the action in chat log
+            _arg_path = current_room + "_messages.txt"
+            _arg_data = "[" + username + " | " + ts + "] uploaded file: " + fname + "\n"
+            append_file()
+
+            print("[" + username + " | " + ts + "] uploaded file to " + current_room + ": " + fname)
+
+    # Download a file from the current room
+    Elif cmd == "getfile":
+        If current_room == "":
+            print("Join a room first with: join [roomname]")
+        Else:
+            _arg_prompt = "Enter filename to download: "
+            input_line()
+            fname = _out_input
+
+            _arg_name = current_room + "_files/" + fname
+            _arg_dest = "received_" + fname
+            download()
+
+            get_time()
+            ts = _out_time
+
+            # Log the action in chat log
+            _arg_path = current_room + "_messages.txt"
+            _arg_data = "[" + username + " | " + ts + "] downloaded file: " + fname + "\n"
+            append_file()
+
+            print("[" + username + " | " + ts + "] downloaded file from " + current_room + " as: " + _out_downloaded)
+
+    Else:
+        print("Unknown command. Try: join [room], chat, sendfile, getfile, quit")
