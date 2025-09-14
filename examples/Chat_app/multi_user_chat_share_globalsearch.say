@@ -1,0 +1,117 @@
+Start Ritual:
+    string banner = "=== Sayit Multi-User Chat + File Share (Global Search) ==="
+    print(banner)
+    print("Commands: join [room], chat, search [room] [keyword], history [room] [user], gsearch [keyword], ghistory [user], quit")
+    print("Global search looks across ALL rooms at once.")
+    end()
+
+Make:
+    current_room = ""
+    username = ""
+    role = "user"
+
+# Username
+_arg_prompt = "Enter your username: "
+input_line()
+username = _out_input
+
+# Ban check
+_arg_path = "banlist.txt"
+import_file()
+banned = _out_imported_source
+If contains(banned, username):
+    print("⛔ Access denied. " + username + " is banned.")
+    exit()
+
+print("Welcome, " + username + "!")
+
+# Role check
+_arg_path = "roles.txt"
+import_file()
+rolelist = _out_imported_source
+If not contains(rolelist, username):
+    _arg_path = "roles.txt"
+    _arg_data = username + ":user\n"
+    append_file()
+    role = "user"
+Else:
+    role = parse_role(rolelist, username)
+
+print("Your role is: " + role)
+
+# Presence
+get_time()
+ts = _out_time
+_arg_path = "presence.txt"
+_arg_data = username + " (online since " + ts + ") {" + role + "}\n"
+append_file()
+
+While true:
+    _arg_prompt = "Command: "
+    input_line()
+    cmd = _out_input
+
+    If cmd == "quit":
+        print("Goodbye " + username + "!")
+        break
+
+    # 🔍 Room-level search
+    Elif cmd startswith "search ":
+        parts = split(cmd, " ")
+        target_room = parts[1]
+        keyword = parts[2]
+
+        _arg_path = target_room + "_messages.txt"
+        import_file()
+        lines = _out_imported_source
+        results = grep(lines, keyword)
+
+        print("=== Search results in " + target_room + " for '" + keyword + "' ===")
+        print(results)
+
+    # 📜 Room-level history
+    Elif cmd startswith "history ":
+        parts = split(cmd, " ")
+        target_room = parts[1]
+        target_user = parts[2]
+
+        _arg_path = target_room + "_messages.txt"
+        import_file()
+        lines = _out_imported_source
+        results = grep(lines, target_user + " |")
+
+        print("=== Message history for " + target_user + " in " + target_room + " ===")
+        print(results)
+
+    # 🌐 Global search (all rooms)
+    Elif cmd startswith "gsearch ":
+        keyword = cmd[8:]
+        rooms_list = ["general", "dev", "music", "adminroom", "announcements", "secrets"]
+
+        print("=== Global search for '" + keyword + "' ===")
+        For room in rooms_list:
+            _arg_path = room + "_messages.txt"
+            import_file()
+            lines = _out_imported_source
+            results = grep(lines, keyword)
+            If results != "":
+                print("--- " + room + " ---")
+                print(results)
+
+    # 🌐 Global history (all rooms by user)
+    Elif cmd startswith "ghistory ":
+        target_user = cmd[9:]
+        rooms_list = ["general", "dev", "music", "adminroom", "announcements", "secrets"]
+
+        print("=== Global history for " + target_user + " ===")
+        For room in rooms_list:
+            _arg_path = room + "_messages.txt"
+            import_file()
+            lines = _out_imported_source
+            results = grep(lines, target_user + " |")
+            If results != "":
+                print("--- " + room + " ---")
+                print(results)
+
+    Else:
+        print("Unknown command. Try: join [room], chat, search [room] [keyword], history [room] [user], gsearch [keyword], ghistory [user], quit")
