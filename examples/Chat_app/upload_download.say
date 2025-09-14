@@ -1,0 +1,12 @@
+# Upload a file
+Make:
+    _arg_path = "photo.png"
+    upload()
+print("File shared: " + _out_uploaded)
+
+# Download a file
+Make:
+    _arg_name = "photo.png"
+    _arg_dest = "received.png"
+    download()
+print("File saved as: " + _out_downloaded)
