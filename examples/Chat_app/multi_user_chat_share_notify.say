@@ -1,0 +1,133 @@
+Start Ritual:
+    string banner = "=== Sayit Multi-User Chat + File Share (Notifications) ==="
+    print(banner)
+    print("Commands: join [room], chat, sendfile, getfile, quit")
+    print("Tip: You must join a room first to chat or share files.")
+    end()
+
+Make:
+    current_room = ""
+    username = ""
+    known_updates = {}   # dictionary of last line counts per room
+
+# Ask for username
+_arg_prompt = "Enter your username: "
+input_line()
+username = _out_input
+print("Welcome, " + username + "!")
+
+While true:
+    # 🔔 Notification check loop
+    rooms_list = ["general", "dev", "music"]   # extend with more rooms if desired
+    For room in rooms_list:
+        _arg_path = room + "_messages.txt"
+        import_file()
+        log = _out_imported_source
+        count = line_count(log)
+
+        If known_updates[room] < count:
+            new_count = count - known_updates[room]
+            print("🔔 [" + room + "] " + str(new_count) + " new message(s)/file(s).")
+            known_updates[room] = count
+
+    # Main prompt
+    _arg_prompt = "Command: "
+    input_line()
+    cmd = _out_input
+
+    If cmd == "quit":
+        print("Goodbye " + username + "!")
+        break
+
+    Elif cmd startswith "join ":
+        current_room = cmd[5:]
+        print("Joined room: " + current_room)
+
+        _arg_path = current_room + "_messages.txt"
+        import_file()
+        print("=== " + current_room + " Chat History ===")
+        print(_out_imported_source)
+
+        known_updates[current_room] = line_count(_out_imported_source)
+
+        print("Type 'chat' to talk in this room, or 'back' to leave chat mode.")
+
+    Elif cmd == "chat":
+        If current_room == "":
+            print("Join a room first with: join [roomname]")
+        Else:
+            print("Entering chat in room: " + current_room)
+            While true:
+                _arg_prompt = "[" + username + "@" + current_room + "] Message: "
+                input_line()
+                msg = _out_input
+
+                If msg == "back":
+                    print("Leaving chat mode.")
+                    break
+
+                get_time()
+                ts = _out_time
+
+                _arg_path = current_room + "_messages.txt"
+                _arg_data = "[" + username + " | " + ts + "] " + msg + "\n"
+                append_file()
+
+                _arg_path = current_room + "_messages.txt"
+                import_file()
+                print("=== " + current_room + " Chat Log ===")
+                print(_out_imported_source)
+
+                known_updates[current_room] = line_count(_out_imported_source)
+
+    Elif cmd == "sendfile":
+        If current_room == "":
+            print("Join a room first with: join [roomname]")
+        Else:
+            _arg_prompt = "Enter file path to upload: "
+            input_line()
+            fname = _out_input
+
+            _arg_path = current_room + "_files/" + fname
+            upload()
+
+            get_time()
+            ts = _out_time
+
+            _arg_path = current_room + "_messages.txt"
+            _arg_data = "[" + username + " | " + ts + "] uploaded file: " + fname + "\n"
+            append_file()
+
+            print("[" + username + " | " + ts + "] uploaded file to " + current_room + ": " + fname)
+
+            _arg_path = current_room + "_messages.txt"
+            import_file()
+            known_updates[current_room] = line_count(_out_imported_source)
+
+    Elif cmd == "getfile":
+        If current_room == "":
+            print("Join a room first with: join [roomname]")
+        Else:
+            _arg_prompt = "Enter filename to download: "
+            input_line()
+            fname = _out_input
+
+            _arg_name = current_room + "_files/" + fname
+            _arg_dest = "received_" + fname
+            download()
+
+            get_time()
+            ts = _out_time
+
+            _arg_path = current_room + "_messages.txt"
+            _arg_data = "[" + username + " | " + ts + "] downloaded file: " + fname + "\n"
+            append_file()
+
+            print("[" + username + " | " + ts + "] downloaded file from " + current_room + " as: " + _out_downloaded)
+
+            _arg_path = current_room + "_messages.txt"
+            import_file()
+            known_updates[current_room] = line_count(_out_imported_source)
+
+    Else:
+        print("Unknown command. Try: join [room], chat, sendfile, getfile, quit")
