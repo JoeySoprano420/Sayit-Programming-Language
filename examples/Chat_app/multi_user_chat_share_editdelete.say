@@ -1,0 +1,104 @@
+Start Ritual:
+    string banner = "=== Sayit Multi-User Chat + File Share (Edit & Delete) ==="
+    print(banner)
+    print("Commands: join [room], chat, react [room] [line#] [emoji], thread [room] [line#], edit [room] [line#] [new text], delete [room] [line#], quit")
+    print("Users can edit/delete their own messages. Admins/mods can edit/delete anyone’s.")
+    end()
+
+Make:
+    current_room = ""
+    username = ""
+    role = "user"
+    known_updates = {}
+    known_dms = {}
+    user_status = "Available"
+
+# Username
+_arg_prompt = "Enter your username: "
+input_line()
+username = _out_input
+
+# Ban check
+_arg_path = "banlist.txt"
+import_file()
+banned = _out_imported_source
+If contains(banned, username):
+    print("⛔ Access denied. " + username + " is banned.")
+    exit()
+
+print("Welcome, " + username + "!")
+
+# Role check
+_arg_path = "roles.txt"
+import_file()
+rolelist = _out_imported_source
+If not contains(rolelist, username):
+    _arg_path = "roles.txt"
+    _arg_data = username + ":user\n"
+    append_file()
+    role = "user"
+Else:
+    role = parse_role(rolelist, username)
+
+print("Your role is: " + role)
+
+# Presence
+get_time()
+ts = _out_time
+_arg_path = "presence.txt"
+_arg_data = username + " (online since " + ts + ") {" + role + "}\n"
+append_file()
+
+While true:
+    # Notifications skipped for brevity (same as before)
+
+    _arg_prompt = "Command: "
+    input_line()
+    cmd = _out_input
+
+    # Quit
+    If cmd == "quit":
+        print("Goodbye " + username + "!")
+        break
+
+    # Edit message
+    Elif cmd startswith "edit ":
+        parts = split(cmd, " ")
+        target_room = parts[1]
+        target_line = parts[2]
+        new_text = join(parts[3:], " ")
+
+        _arg_path = target_room + "_messages.txt"
+        import_file()
+        lines = _out_imported_source
+        orig_line = get_line(lines, target_line)
+
+        If (role == "admin" or role == "moderator") or contains(orig_line, username):
+            updated_line = orig_line + " (edited by " + username + "): " + new_text
+            new_lines = replace_line(lines, target_line, updated_line)
+            _arg_data = new_lines
+            export_file()
+            print("✏️ Message on line " + target_line + " in " + target_room + " edited.")
+        Else:
+            print("⛔ Permission denied: You can only edit your own messages.")
+
+    # Delete message
+    Elif cmd startswith "delete ":
+        parts = split(cmd, " ")
+        target_room = parts[1]
+        target_line = parts[2]
+
+        _arg_path = target_room + "_messages.txt"
+        import_file()
+        lines = _out_imported_source
+        orig_line = get_line(lines, target_line)
+
+        If (role == "admin" or role == "moderator") or contains(orig_line, username):
+            new_lines = replace_line(lines, target_line, "[deleted by " + username + "]")
+            _arg_data = new_lines
+            export_file()
+            print("🗑️ Message on line " + target_line + " in " + target_room + " deleted.")
+        Else:
+            print("⛔ Permission denied: You can only delete your own messages.")
+
+    # Other commands (chat, join, react, thread, etc.) same as before...

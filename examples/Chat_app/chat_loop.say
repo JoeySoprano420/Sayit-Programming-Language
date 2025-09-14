@@ -1,0 +1,19 @@
+While true:
+    _arg_prompt = "Enter message (or 'quit'): "
+    input_line()
+    msg = _out_input
+
+    If msg == "quit":
+        print("Exiting chat.")
+        break
+
+    # Send message
+    _arg_path = "messages.txt"
+    _arg_data = msg
+    export_file()
+
+    # Receive chat history
+    _arg_path = "messages.txt"
+    import_file()
+    print("Chat log:")
+    print(_out_imported_source)

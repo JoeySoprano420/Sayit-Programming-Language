@@ -1,280 +1,238 @@
-# 📘 **Sayit Programming Language — Official Instruction Sheet**
+# 📖 Sayit Instruction Sheet
 
-**Version:** v1.0.0
-**Tagline:** *Sayit — Code as Ritual, Logic as Ceremony.*
-
----
-
-## 1. Overview
-
-**Sayit (.say)** is a **general-purpose programming language** designed for readability, safety, and performance.
-
-It features:
-
-* **Ritualistic program structure** (`Start Ritual`, `Finally`).
-* **Readable control flow** (`If … Elif … Else`, `While … until`).
-* **Deterministic safety constructs** (`fail()`, `end()`).
-* **LLVM/NASM dual backend** for optimized binaries.
-* **Lightweight VM interpreter** for prototyping.
+*A Language of Ritual and Execution*
 
 ---
 
-## 2. System Requirements
+## 🌑 1. Core Syntax
 
-* **Supported Operating Systems:**
+Sayit programs are **ritual-based scripts**. Each program is made up of **blocks** that resemble ceremonial text.
 
-  * Linux (Ubuntu 20.04+, Arch, Fedora)
-  * macOS (12+)
-  * Windows 10/11
+* **Keywords**: `Start`, `Ritual`, `Make`, `While`, `If`, `Elif`, `Else`, `Finally`, `print`, `end()`
+* **Comments**: Begin with `#`, ignored by the lexer.
+* **Case**: Keywords are case-insensitive (`Start Ritual` = `start ritual`).
+* **Termination**: Blocks are closed by `end()` or another block keyword.
 
-* **Runtime Dependencies:**
-
-  * Python ≥ 3.11 (for VM & development builds)
-  * LLVM/Clang (for native compilation)
-
-* **Optional Tools:**
-
-  * Git (to clone repo)
-  * CMake (for extended builds)
-
----
-
-## 3. Download & Install
-
-### Option 1 — Prebuilt Binaries (Recommended)
-
-* Visit the [GitHub Releases page](https://github.com/YOUR-ORG/sayit/releases).
-* Download the package for your platform:
-
-  * **Linux:** `sayit-ubuntu-latest.tar.gz`
-  * **macOS:** `sayit-macos-latest.tar.gz`
-  * **Windows:** `sayit-windows-latest.zip`
-* Extract the package:
-
-  ```bash
-  tar -xzf sayit-ubuntu-latest.tar.gz
-  cd sayit
-  ```
-* Add to your `$PATH`:
-
-  ```bash
-  export PATH=$PWD:$PATH
-  ```
-
-### Option 2 — Build from Source
-
-```bash
-git clone https://github.com/YOUR-ORG/sayit.git
-cd sayit
-pip install -r requirements.txt
-```
-
-Run the compiler:
-
-```bash
-python sayc.py hello.say
-```
-
----
-
-## 4. Quick Start
-
-Create `hello.say`:
+Example:
 
 ```say
 Start Ritual:
-    string message = "Hello, World!"
-    print(message)
-Finally:
-    end()
-```
-
-Run in VM:
-
-```bash
-sayc hello.say
-```
-
-Compile to LLVM IR:
-
-```bash
-sayc hello.say --ir --out hello.ll
-clang hello.ll -o hello
-./hello
+    string msg = "Hello World!"
+    print(msg)
+end()
 ```
 
 ---
 
-## 5. Language Structure
+## 🔮 2. Blocks & Rituals
 
-### 5.1 Ritual Invocation
+### **Start Ritual**
 
-Every program must begin and end ceremonially:
+Defines the opening ceremony of a program.
+Inside, you may declare variables and perform actions.
 
 ```say
 Start Ritual:
-    ...code...
-Finally:
-    end()
+    string greeting = "Blessings!"
+    print(greeting)
+end()
 ```
 
 ---
 
-### 5.2 Initialization
+### **Make**
 
-Declare and initialize variables:
+Used to declare and initialize variables in a formal way.
 
 ```say
 Make:
-    x = 1
-    y = 2
+    x = 10
+    y = 25
 ```
 
 ---
 
-### 5.3 Control Flow
+### **While**
 
-**Loops of Becoming:**
+Loops until a condition is false.
+Condition format: `While <var> <op> <number>:`
 
 ```say
-While z < 10:
-    y = y + x until y == 9
+Make:
+    counter = 0
+
+While counter < 3:
+    print("Looping...")
+    counter = counter + 1
 ```
 
-**Threshold Checks:**
+---
+
+### **If / Elif / Else**
+
+Branching control flow.
 
 ```say
-If z > 7 and z < 9:
-    print("true")
-Elif z in [3...8]:
-    print("maybe")
+Make:
+    n = 7
+
+If n > 10:
+    print("Greater than 10")
+Elif n == 10:
+    print("Equal to 10")
 Else:
-    print("false")
-```
-
-**Eternal Conditions:**
-
-```say
-While true:
-    execute()
-While false:
-    fail()
+    print("Less than 10")
 ```
 
 ---
 
-### 5.4 Expressions & Operators
+### **Finally**
 
-Supported binary operators:
-`+`, `-`, `*`, `/`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `and`, `or`
-
-Ranges:
+Runs after everything else, regardless of earlier branches.
 
 ```say
-If x in [1...5]:
-    print("inside range")
+Finally:
+    print("End of program reached.")
 ```
 
 ---
 
-## 6. Compiler & VM
+## ⚖️ 3. Expressions & Operators
 
-* **VM Mode (default):**
-  Interprets `.say` files. Best for quick testing.
+Supported operators:
 
-* **LLVM IR Mode:**
+* Arithmetic: `+  -  *  /`
+* Comparison: `==  !=  <  <=  >  >=`
+* Boolean: `and  or`
 
-  ```bash
-  sayc program.say --ir --out program.ll
-  clang program.ll -o program
-  ./program
+Examples:
+
+```say
+x = 10 + 5
+y = x * 2
+If y >= 30:
+    print("Big number")
+```
+
+---
+
+## 📦 4. Variables & Types
+
+Sayit uses **dynamic typing** with lightweight declarations.
+
+* `string` for text:
+
+  ```say
+  string name = "Eartha"
   ```
+* `number` for integers (implicit when assigning):
 
-* **NASM Hooks:**
-  Inline assembly supported via `asm { ... }` (advanced).
+  ```say
+  score = 42
+  ```
+* **Identifiers**: letters, numbers, underscores. Must not start with a digit.
 
----
-
-## 7. Standard Library (v1.0)
-
-* **IO**: `print()`, `read()`
-* **Math**: `+ - * /` plus extended math module
-* **Control**: `fail()`, `end()`
-* **Data Types**: string, int, bool, list
+Variables live in the **ritual scope** and can be updated.
 
 ---
 
-## 8. IDE & Editor Support
+## 🔁 5. Control Flow
 
-* **VS Code Extension:** Syntax highlighting (`.say`).
-* **Vim/Emacs:** Highlight definitions available.
-* **CLI Tools:**
+* **Sequential execution**: runs top to bottom.
+* **While loops**: repetition until condition false.
+* **If/Else**: conditional branching.
+* **Finally**: guaranteed final step.
 
-  * `sayc` — compiler
-  * `sayvm` — VM interpreter
-  * `saydoc` — doc generator
-
----
-
-## 9. Learning Curve
-
-* **Beginner:** Ritual-like structure is self-descriptive.
-* **Intermediate:** Range conditions and `until` loops add power.
-* **Advanced:** Inline NASM and LLVM backend expose full system control.
+Nested structures are supported.
 
 ---
 
-## 10. Safety & Security
+## 🛠️ 6. Builtins & Services
 
-* **Explicit Exit Conditions:** `until` replaces unsafe breakpoints.
-* **Dead-Code Signaling:** `While false:` is explicit, not accidental.
-* **Fail-Fast Philosophy:** `fail()` prevents silent crashes.
-* **LLVM Verification:** all IR passes safety checks.
+### **Core builtins**
 
----
+* `print(x)` → print variable or string.
+* `end()` → terminate ritual.
 
-## 11. Roadmap
+### **VM services (via CALL or builtins)**
 
-* **v1.1:** richer collections (dicts, tuples).
-* **v2.0:** concurrency primitives (`spawn`, `channel`).
-* **v3.0:** WASM runtime for cloud deployments.
+* **I/O**: `import_file`, `export_file`, `input_line`
+* **Net**: `packetize`, `upload`, `download`, `ping`
+* **Util**: `capsule`, `scan_text`, `compile_ast`, `scale`, `range_check`
+* **Scopes**: `push_scope`, `pop_scope`, `get_scope`
 
----
+Example (pseudo):
 
-## 12. Why Choose Sayit?
-
-* **Readable like Python**
-* **Safe like Rust**
-* **Fast like C**
-* **Expressive like a story**
-
-Sayit redefines programming as a **ritual of clarity and precision**.
+```say
+# Save data
+_arg_path = "out.txt"
+_arg_data = "Hello file"
+CALL "export_file"
+```
 
 ---
 
-## 13. Support & Contribution
+## 🖥️ 7. CLI Usage
 
-* **Docs:** [https://sayit.dev/docs](https://sayit.dev/docs)
-* **Issues:** [https://github.com/YOUR-ORG/sayit/issues](https://github.com/YOUR-ORG/sayit/issues)
-* **Contribute:** Fork, branch, PR.
-* **Community:** Discord/Slack channels available.
-
----
-
-# ✅ TL;DR — Quick Install & Run
+`sayc.py` is the master CLI driver.
 
 ```bash
-# Download
-wget https://github.com/YOUR-ORG/sayit/releases/download/v1.0.0/sayit-ubuntu-latest.tar.gz
-tar -xzf sayit-ubuntu-latest.tar.gz
-export PATH=$PWD:$PATH
+# Run a program
+python sayc.py run hello.say
 
-# Write a program
-echo 'Start Ritual:\n    print("Hello")\nFinally:\n    end()' > hello.say
+# Build IR (pure Python backend)
+python sayc.py build hello.say --engine ir
 
-# Run
-sayc hello.say
+# Start REPL
+python sayc.py repl
+
+# Run all tests in /tests
+python sayc.py test
 ```
 
+Options:
+
+* `--libs file1.say file2.say` → preload libraries
+* `--watch` → watch mode
+* `--engine vm|ir|custom` → select engine
+* `--force` → ignore IR cache
+* `--verbose` → debug logs
+
 ---
+
+## 🧪 8. Testing & Debugging
+
+Tests live in the `tests/` directory.
+Use **inline expectations**:
+
+```say
+print("Hello World!")  # expect: Hello World!
+```
+
+Run all tests:
+
+```bash
+python sayc.py test
+```
+
+Debugging aids:
+
+* `--trace` → show each instruction in VM
+* `--profile` → count opcode usage
+* `--dump-vars` → show VM variable state
+
+---
+
+## 🌌 9. Philosophy & Style
+
+* Code is **ceremonial**: every block feels like a ritual.
+* Programs are **narrative**: they read like storytelling, not machinery.
+* Execution is **pragmatic**: though poetic, everything runs deterministically.
+* The design is **hackable**: pure Python backends, pluggable engines, IR caching.
+
+Sayit is a blend of **myth and machine** — a language where you *write ceremonies, but run software*.
+
+---
+
+✅ That’s the **complete instruction sheet** — both a reference manual and a narrative guide.
 
