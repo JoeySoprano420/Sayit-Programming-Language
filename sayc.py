@@ -24,7 +24,32 @@ from typing import List, Optional, Dict, Any
 
 from say_lexer import tokenize
 from say_parser import Parser
-from say_vm import VM
+
+# Try to import a VM class in a backward-compatible way:
+# - Prefer `VM` if a direct compatibility class is provided.
+# - Fall back to `CompatVM` if present.
+# - Otherwise wrap `ExecVM` with a thin compatibility shim exposing `.run(program)` and `.vars`.
+try:
+    from say_vm import VM  # type: ignore
+except Exception:
+    try:
+        from say_vm import CompatVM as VM  # type: ignore
+    except Exception:
+        from say_vm import ExecVM as _ExecVM  # type: ignore
+
+        class VM:
+            """
+            Minimal compatibility wrapper around ExecVM to provide the old `.run(program)` API
+            and expose `.vars`. This keeps `sayc` working even if upstream renamed VM types.
+            """
+            def __init__(self, max_steps: Optional[int] = 1_000_000, timeout: Optional[float] = None, trace: bool = False, **kwargs):
+                # mirror common ExecVM constructor arguments
+                self._exec = _ExecVM(max_steps=max_steps, timeout=timeout, trace=trace, **kwargs)
+                self.vars = self._exec.vars
+
+            def run(self, program):
+                return self._exec.run_program(program)
+
 
 # Keep Codegen import lazy so llvmlite is optional
 # from say_codegen import Codegen
@@ -174,8 +199,19 @@ def compile_to_ir_and_maybe_cache(program, out_filename: Optional[str], force: b
         return None
 
 def run_with_vm(program, args):
+    # Create VM instance with backward-compatible parameter; call its run method if available.
     vm = VM(max_steps=getattr(args, "max_steps", 1000000))
-    vm.run(program)
+    # Some VM variants return a result from run; call it for side-effects and ignore the return
+    # to preserve previous behavior where we returned the VM object.
+    if hasattr(vm, "run"):
+        try:
+            vm.run(program)
+        except TypeError:
+            # fallback: if run expects different args, try run_program
+            if hasattr(vm, "run_program"):
+                vm.run_program(program)
+    elif hasattr(vm, "run_program"):
+        vm.run_program(program)
     return vm
 
 def run_with_module_engine(mod, program, args):
