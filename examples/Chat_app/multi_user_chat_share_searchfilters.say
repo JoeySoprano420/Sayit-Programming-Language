@@ -1,0 +1,126 @@
+Start Ritual:
+    string banner = "=== Sayit Multi-User Chat + File Share (Advanced Search Filters) ==="
+    print(banner)
+    print("Commands: gsearch [keyword], ghistory [user], gsearch-date [keyword] [after/before YYYY-MM-DD], gsearch-role [keyword] [role], gsearch-threads [keyword], quit")
+    print("Filters: by date, by role, or threads only.")
+    end()
+
+Make:
+    username = ""
+    role = "user"
+
+# Username
+_arg_prompt = "Enter your username: "
+input_line()
+username = _out_input
+
+# Ban check
+_arg_path = "banlist.txt"
+import_file()
+banned = _out_imported_source
+If contains(banned, username):
+    print("⛔ Access denied. " + username + " is banned.")
+    exit()
+
+print("Welcome, " + username + "!")
+
+# Role check
+_arg_path = "roles.txt"
+import_file()
+rolelist = _out_imported_source
+If not contains(rolelist, username):
+    _arg_path = "roles.txt"
+    _arg_data = username + ":user\n"
+    append_file()
+    role = "user"
+Else:
+    role = parse_role(rolelist, username)
+
+print("Your role is: " + role)
+
+# Room list
+rooms_list = ["general", "dev", "music", "adminroom", "announcements", "secrets"]
+
+While true:
+    _arg_prompt = "Command: "
+    input_line()
+    cmd = _out_input
+
+    If cmd == "quit":
+        print("Goodbye " + username + "!")
+        break
+
+    # 🌐 Global keyword search
+    Elif cmd startswith "gsearch ":
+        keyword = cmd[8:]
+        print("=== Global search for '" + keyword + "' ===")
+        For room in rooms_list:
+            _arg_path = room + "_messages.txt"
+            import_file()
+            lines = _out_imported_source
+            results = grep(lines, keyword)
+            If results != "":
+                print("--- " + room + " ---")
+                print(results)
+
+    # 🌐 Global history
+    Elif cmd startswith "ghistory ":
+        target_user = cmd[9:]
+        print("=== Global history for " + target_user + " ===")
+        For room in rooms_list:
+            _arg_path = room + "_messages.txt"
+            import_file()
+            lines = _out_imported_source
+            results = grep(lines, target_user + " |")
+            If results != "":
+                print("--- " + room + " ---")
+                print(results)
+
+    # 📅 Global search with date filter
+    Elif cmd startswith "gsearch-date ":
+        parts = split(cmd, " ")
+        keyword = parts[1]
+        mode = parts[2]  # before / after
+        date_filter = parts[3]  # YYYY-MM-DD
+
+        print("=== Global search for '" + keyword + "' (" + mode + " " + date_filter + ") ===")
+        For room in rooms_list:
+            _arg_path = room + "_messages.txt"
+            import_file()
+            lines = _out_imported_source
+            results = grep_date(lines, keyword, mode, date_filter)
+            If results != "":
+                print("--- " + room + " ---")
+                print(results)
+
+    # 👤 Global search by role
+    Elif cmd startswith "gsearch-role ":
+        parts = split(cmd, " ")
+        keyword = parts[1]
+        target_role = parts[2]
+
+        print("=== Global search for '" + keyword + "' by role '" + target_role + "' ===")
+        For room in rooms_list:
+            _arg_path = room + "_messages.txt"
+            import_file()
+            lines = _out_imported_source
+            results = grep_role(lines, keyword, target_role)
+            If results != "":
+                print("--- " + room + " ---")
+                print(results)
+
+    # 🧵 Global search in threads
+    Elif cmd startswith "gsearch-threads ":
+        keyword = cmd[15:]
+        print("=== Global thread search for '" + keyword + "' ===")
+        For room in rooms_list:
+            _arg_path = room + "_threads.txt"
+            import_file()
+            lines = _out_imported_source
+            results = grep(lines, keyword)
+            If results != "":
+                print("--- Threads in " + room + " ---")
+                print(results)
+
+    Else:
+        print("Unknown command. Try: gsearch, ghistory, gsearch-date, gsearch-role, gsearch-threads, quit")
